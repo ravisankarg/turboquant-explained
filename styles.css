@@ -59,6 +59,14 @@ code {
   z-index: 5;
 }
 
+.nav {
+  scrollbar-width: none;
+}
+
+.nav::-webkit-scrollbar {
+  display: none;
+}
+
 .nav a {
   text-decoration: none;
   font-weight: 700;
@@ -596,6 +604,209 @@ code {
   background: linear-gradient(90deg, var(--gold), var(--red));
 }
 
+.kv-deep {
+  padding-top: 10px;
+}
+
+.kv-step-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.kv-step-card,
+.attention-diagram,
+.kv-notes article {
+  background: rgba(255,255,255,.9);
+  border: 1px solid rgba(20,21,26,.1);
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.kv-step-card {
+  padding: 20px;
+  min-height: 268px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kv-step-card h3,
+.attention-left h3,
+.kv-notes h3 {
+  margin: 0;
+}
+
+.kv-step-card p,
+.attention-left p,
+.kv-notes p {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.kv-token-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.kv-token-row b,
+.kv-token-row span,
+.compressed-cache div,
+.mini-pipeline span,
+.mini-pipeline i {
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fafafa;
+}
+
+.kv-token-row b,
+.kv-token-row span {
+  padding: 12px;
+}
+
+.kv-token-row b {
+  background: #15171d;
+  color: #fff;
+}
+
+.mini-pipeline {
+  display: grid;
+  grid-template-columns: 1fr 46px 1.1fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.mini-pipeline span,
+.mini-pipeline i {
+  min-height: 52px;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  text-align: center;
+  font-weight: 800;
+  font-style: normal;
+}
+
+.mini-pipeline i {
+  background: #edf7f7;
+  color: var(--teal);
+  font-family: var(--mono);
+  font-size: 22px;
+}
+
+.mini-pipeline .bits {
+  background: #15171d;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.compressed-cache {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.compressed-cache div {
+  padding: 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.compressed-cache small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.compressed-cache strong {
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.attention-diagram {
+  display: grid;
+  grid-template-columns: minmax(280px, .8fr) minmax(420px, 1.2fr);
+  gap: 20px;
+  padding: 22px;
+  margin-top: 16px;
+}
+
+.attention-left {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attention-left code {
+  display: block;
+  padding: 13px;
+  background: #15171d;
+  color: #f8efe2;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.attention-right {
+  display: grid;
+  gap: 12px;
+}
+
+.attention-stage {
+  display: grid;
+  grid-template-columns: 1fr 54px 1fr 54px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.attention-stage strong,
+.attention-stage span {
+  min-height: 60px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 9px;
+}
+
+.attention-stage strong {
+  background: #f4f7fb;
+  border: 1px solid var(--line);
+}
+
+.attention-stage span {
+  background: var(--teal);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.attention-stage.values span {
+  background: var(--gold);
+}
+
+.kv-notes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.kv-notes article {
+  padding: 20px;
+  display: grid;
+  gap: 10px;
+}
+
+.kv-formula {
+  margin-top: 16px;
+}
+
 .results {
   border-top: 1px solid var(--line);
 }
@@ -666,8 +877,14 @@ footer a { text-decoration: none; color: var(--ink); }
   }
 
   .db-flow,
+  .kv-step-grid,
+  .kv-notes,
   .result-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .attention-diagram {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -697,8 +914,16 @@ footer a { text-decoration: none; color: var(--ink); }
 
   .polar-grid,
   .db-flow,
+  .kv-step-grid,
+  .kv-notes,
   .result-grid,
   .metric-row {
+    grid-template-columns: 1fr;
+  }
+
+  .attention-stage,
+  .mini-pipeline,
+  .compressed-cache {
     grid-template-columns: 1fr;
   }
 

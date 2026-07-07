@@ -241,6 +241,104 @@
       </div>
     </section>
 
+    <section class="section kv-deep">
+      <div class="section-copy wide">
+        <p class="eyebrow">KV-cache mechanics</p>
+        <h2>What happens at store time and attention time</h2>
+        <p>
+          TurboQuant does not replace attention. It changes how past keys and values are stored. New K/V vectors are compressed as they enter the cache. Later, attention kernels read compressed blocks, reconstruct approximate K/V values only for the current computation, and discard those temporary values.
+        </p>
+      </div>
+
+      <div class="kv-step-grid">
+        <article class="kv-step-card">
+          <span class="step">store time</span>
+          <h3>1. Compute the new token's K and V</h3>
+          <div class="kv-token-row">
+            <b>token t</b>
+            <span>K_t fp16/bf16</span>
+            <span>V_t fp16/bf16</span>
+          </div>
+          <p>The model creates normal full-precision key and value vectors for the newest token.</p>
+        </article>
+
+        <article class="kv-step-card">
+          <span class="step">compress</span>
+          <h3>2. Rotate, PolarQuant, then QJL</h3>
+          <div class="mini-pipeline">
+            <span>K_t</span>
+            <i>R</i>
+            <span>polar codes</span>
+            <span class="bits">01011001</span>
+          </div>
+          <p>Random rotation smooths channels, PolarQuant stores radius plus angle, and QJL stores the residual as sign bits.</p>
+        </article>
+
+        <article class="kv-step-card">
+          <span class="step">cache memory</span>
+          <h3>3. Store compressed K/V codes</h3>
+          <div class="compressed-cache">
+            <div><small>K cache</small><strong>codes + bits</strong></div>
+            <div><small>V cache</small><strong>codes + bits</strong></div>
+          </div>
+          <p>The long-context memory footprint shrinks because the cache keeps compact codes instead of full tensors.</p>
+        </article>
+      </div>
+
+      <div class="attention-diagram">
+        <div class="attention-left">
+          <span class="step">query time</span>
+          <h3>The current query stays high precision</h3>
+          <p>
+            The query is temporary, so there is little memory benefit in storing it compressed. If cached keys live in rotated space, the query is rotated at runtime before scoring.
+          </p>
+          <code>q_rot = R q_current</code>
+        </div>
+        <div class="attention-right">
+          <div class="attention-stage">
+            <strong>compressed K blocks</strong>
+            <span>load</span>
+            <strong>on-the-fly dequant</strong>
+            <span>score</span>
+            <strong>q_rot dot K_hat</strong>
+          </div>
+          <div class="attention-stage values">
+            <strong>compressed V blocks</strong>
+            <span>load</span>
+            <strong>on-the-fly dequant</strong>
+            <span>mix</span>
+            <strong>sum weights * V_hat</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="kv-notes">
+        <article>
+          <h3>Is dequantization needed?</h3>
+          <p>
+            Yes, but usually it is fused into the attention kernel. The full cache is not permanently expanded. A block is loaded, dequantized into registers or fast local memory, used for dot products or value accumulation, then discarded.
+          </p>
+        </article>
+        <article>
+          <h3>Keys and values have different jobs</h3>
+          <p>
+            Keys must preserve attention scores, so the rotated query and reconstructed keys must keep dot products close. Values must preserve the final weighted representation, so the value approximation must be accurate after softmax weights are applied.
+          </p>
+        </article>
+        <article>
+          <h3>Why this helps long context</h3>
+          <p>
+            Long prompts repeatedly read old K/V vectors. Compression reduces cache memory and memory bandwidth, which can unlock larger context windows, higher batch sizes, or faster attention on suitable kernels.
+          </p>
+        </article>
+      </div>
+
+      <div class="formula-band kv-formula">
+        <code>cache stores codes; attention uses K_hat and V_hat temporarily</code>
+        <span>The model still computes normal attention, but the cache representation is compact.</span>
+      </div>
+    </section>
+
     <section class="section results">
       <div class="section-copy wide">
         <p class="eyebrow">Reported results</p>
