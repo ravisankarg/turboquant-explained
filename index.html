@@ -84,6 +84,15 @@
           <span>outliers set the grid</span>
         </div>
         <div class="vector-bars" id="originalBars"></div>
+        <article class="index-quant-card section-quant-card">
+          <span class="step">standard 4-bit bins</span>
+          <h3>Bins are decided by the original min and max</h3>
+          <p>
+            The running vector has <code>min = -10.20</code> and <code>max = 9.80</code>, so 16 bins must cover a 20-point range. The step is <code>(9.80 - -10.20) / 15 = 1.333</code>.
+          </p>
+          <div class="bin-strip" id="standardBins"></div>
+          <div class="error-list" id="standardErrorList"></div>
+        </article>
       </div>
     </section>
 
@@ -121,6 +130,15 @@
         <code>(Rq) dot (Rk) = q dot k</code>
         <span>That is why rotation can help quantization without changing the semantic geometry.</span>
       </div>
+      <article class="index-quant-card section-quant-card">
+        <span class="step">rotated 4-bit bins</span>
+        <h3>The same vector lands in smoother bins</h3>
+        <p>
+          After rotation, the example coordinates sit between <code>-5.02</code> and <code>5.31</code>. The 4-bit bins are closer together, and no single dimension owns the whole scale.
+        </p>
+        <div class="bin-strip" id="rotatedBins"></div>
+        <div class="error-list" id="rotatedErrorList"></div>
+      </article>
     </section>
 
     <section class="section split" id="polarquant">
@@ -140,6 +158,24 @@
           <span>using the same vector</span>
         </div>
         <div class="polar-grid" id="polarGrid"></div>
+        <figure class="polar-reference">
+          <img src="assets/quantization-google-snapshot.png" alt="Google Research PolarQuant animation snapshot showing Cartesian input transformed into polar representation">
+          <figcaption>
+            This Google Research snapshot shows the PolarQuant move: the blue Cartesian representation is transformed into a yellow polar representation. In this page's running example, that means pairs such as <code>(0.15, 9.80)</code> are binned by radius and angle before dequantization. <a href="assets/quantization-google.mp4">Open the referenced MP4</a>.
+          </figcaption>
+        </figure>
+        <article class="index-quant-card section-quant-card">
+          <span class="step">polar bins</span>
+          <h3>Pair bins keep magnitude and direction separate</h3>
+          <p>
+            PolarQuant bins each pair by radius and angle. The large pair <code>(0.15, 9.80)</code> keeps the fact that it points almost straight up, instead of treating <code>0.15</code> as noise beside an outlier.
+          </p>
+          <span class="bin-caption">radius bins</span>
+          <div class="bin-strip paired" id="polarRadiusBins"></div>
+          <span class="bin-caption">angle bins</span>
+          <div class="bin-strip paired" id="polarAngleBins"></div>
+          <div class="error-list" id="polarErrorList"></div>
+        </article>
       </div>
     </section>
 
@@ -151,7 +187,10 @@
           PolarQuant captures most of the vector. It still leaves a small residual error. TurboQuant's product-oriented version uses a one-bit Quantized Johnson-Lindenstrauss correction: project the residual in random directions and store only whether each projection is positive or negative.
         </p>
         <p>
-          It is not trying to store every residual coordinate exactly. It keeps enough random-projection geometry to reduce inner-product bias.
+          The residual is just the quantization mistake left after dequantizing the PolarQuant code: <code>residual = original vector - dequantized PolarQuant vector</code>. For the running example, if <code>d4</code> starts as <code>9.800</code> and PolarQuant reconstructs it as <code>9.807</code>, then the residual at that dimension is <code>9.800 - 9.807 = -0.007</code>.
+        </p>
+        <p>
+          QJL is not trying to store every residual coordinate exactly. It takes random dot products with that residual and stores only the sign of each result. Those signs preserve useful correction information for inner products without storing another full vector.
         </p>
       </div>
       <div class="panel">
@@ -161,15 +200,23 @@
         </div>
         <div class="residual-box">
           <div>
-            <span class="label">residual</span>
-            <code>[+.004, -.002, -.021, +.001, +.004, -.003, -.002, +.002]</code>
+            <span class="label">1. dequantized PolarQuant vector</span>
+            <code>x_hat = [0.121, -0.079, 0.148, 9.807, -0.108, 0.061, -10.191, 0.177]</code>
+          </div>
+          <div>
+            <span class="label">2. residual = x - x_hat</span>
+            <code>[0.120, -0.080, 0.150, 9.800, -0.110, 0.060, -10.200, 0.180] - x_hat</code>
+            <code>[-.001, -.001, +.002, -.007, -.002, -.001, -.009, +.003]</code>
           </div>
           <div class="arrow-down">&darr; random projections</div>
           <div>
-            <span class="label">stored QJL bits</span>
+            <span class="label">3. stored QJL bits</span>
             <div class="bit-row large">
               <b>0</b><b>1</b><b>0</b><b>1</b><b>1</b><b>0</b><b>0</b><b>1</b>
             </div>
+            <p class="residual-note">
+              Each bit is <code>1</code> when one random projection of the residual is positive, and <code>0</code> when it is negative. During scoring, those signs help correct the bias left by the quantized approximation.
+            </p>
           </div>
         </div>
       </div>
@@ -214,6 +261,32 @@
           <code>cosine(q_fp32, x_hat)</code>
           <p>Recover accuracy where it matters: the final shortlist.</p>
         </article>
+      </div>
+      <div class="quant-summary panel">
+        <div class="panel-head">
+          <h3>Same vector quantized two ways</h3>
+          <span>4-bit toy example</span>
+        </div>
+        <p>
+          Standard min-max quantization uses one grid for the whole vector, so the two outliers consume most of the 16 buckets. TurboQuant first changes the coordinate story, then stores compact codes plus residual signs, so dequantized shortlist vectors stay closer to the original.
+        </p>
+        <div class="quant-table-wrap">
+          <table class="quant-table">
+            <thead>
+              <tr>
+                <th>Dim</th>
+                <th>Original</th>
+                <th>Standard 4-bit step</th>
+                <th>Standard code</th>
+                <th>Standard dequant</th>
+                <th>TurboQuant step</th>
+                <th>TurboQuant code</th>
+                <th>TurboQuant dequant</th>
+              </tr>
+            </thead>
+            <tbody id="quantTable"></tbody>
+          </table>
+        </div>
       </div>
       <div class="callout">
         <strong>Key design choice:</strong>
