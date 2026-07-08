@@ -635,13 +635,17 @@ code {
 
 .bin-strip {
   display: grid;
-  grid-template-columns: repeat(16, minmax(74px, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 4px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #f8fafc;
-  overflow-x: auto;
+  overflow: visible;
+}
+
+.section.split .bin-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .bin {
@@ -706,12 +710,12 @@ code {
 }
 
 .bin small {
-  max-width: 68px;
+  max-width: 100%;
   overflow-wrap: anywhere;
 }
 
 .bin-strip.paired {
-  grid-template-columns: repeat(16, minmax(74px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .bin-caption {
@@ -1174,6 +1178,12 @@ footer a { text-decoration: none; color: var(--ink); }
   .mini-pipeline,
   .compressed-cache {
     grid-template-columns: 1fr;
+  }
+
+  .bin-strip,
+  .section.split .bin-strip,
+  .bin-strip.paired {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .formula-band,
