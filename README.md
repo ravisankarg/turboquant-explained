@@ -20,11 +20,12 @@ https://ravisankarg.github.io/turboquant-explained/
 The app does this on-device:
 
 1. Download either the first 50,000 or first 1,000,000 Cohere 768-d vectors from Hugging Face raw `.f32` data.
-2. Tap the benchmark button; it detects every downloaded dataset.
-3. For each available dataset, build an exact FP32 baseline for recall ground truth.
-4. Build TurboQuant indexes at 8, 4, 3, and 2 bits.
-5. Run 1000 self queries and 1000 deterministic random mixture queries per dataset.
-6. Report one combined KPI table with dataset, vector count, R@1, R@10, index time, prepare time, search latency, ROM, and RAM.
+2. Downloads continue in a foreground data-sync service if the app is backgrounded or the screen turns off. Interrupted transfers resume from the saved `.part` byte offset.
+3. Tap the benchmark button; it detects every downloaded dataset.
+4. For each available dataset, build an exact FP32 baseline for recall ground truth.
+5. Build TurboQuant indexes at 8, 4, 3, and 2 bits.
+6. Run 1000 self queries and 1000 deterministic random mixture queries per dataset.
+7. Report one combined KPI table with dataset, vector count, R@1, R@10, index time, prepare time, search latency, ROM, and RAM.
 
 Install the tested APK:
 

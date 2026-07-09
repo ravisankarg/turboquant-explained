@@ -1,6 +1,8 @@
 package com.turboquant.benchmark;
 
 import android.app.Activity;
+import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -18,10 +20,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -29,8 +27,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final String VECTOR_URL =
-            "https://huggingface.co/datasets/YoKONCy/Cohere-1M-wikipedia-768d/resolve/main/cohere_train.f32";
     private static final int DIM = 768;
     private static final Dataset[] DATASETS = new Dataset[]{
             new Dataset("cohere-50k", "Cohere 50K vectors", "cohere_50k_768.f32", 50_000),
@@ -44,6 +40,13 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
     private TextView status;
     private LinearLayout results;
+    private final Runnable downloadPoller = new Runnable() {
+        @Override
+        public void run() {
+            refreshDownloadState();
+            main.postDelayed(this, 1000L);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,7 +56,20 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        main.post(downloadPoller);
+    }
+
+    @Override
+    protected void onPause() {
+        main.removeCallbacks(downloadPoller);
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
+        main.removeCallbacks(downloadPoller);
         worker.shutdownNow();
         super.onDestroy();
     }
@@ -125,71 +141,33 @@ public class MainActivity extends Activity {
         progress.setProgress(0);
         benchmarkButton.setEnabled(hasAnyDataset());
         status.setText(datasetStatus());
+        refreshDownloadState();
     }
 
     private void startDownload(Dataset dataset) {
-        setBusy(true);
+        if (DownloadService.snapshot(this).running) {
+            status.setText("A download is already running.");
+            return;
+        }
+        setDownloadRunningUi(true);
         results.removeAllViews();
-        status.setText("Starting download: " + dataset.label);
-        worker.execute(() -> {
-            File tmp = new File(getFilesDir(), dataset.fileName + ".part");
-            try {
-                downloadRange(dataset, tmp);
-                File target = dataset.path(getFilesDir());
-                if (target.exists() && !target.delete()) {
-                    throw new IllegalStateException("Could not replace old vector file");
-                }
-                if (!tmp.renameTo(target)) {
-                    throw new IllegalStateException("Could not move downloaded vector file");
-                }
-                main.post(() -> {
-                    progress.setProgress(progress.getMax());
-                    status.setText("Download complete: " + dataset.label + " (" + humanBytes(target.length()) + ")");
-                    setBusy(false);
-                    benchmarkButton.setEnabled(hasAnyDataset());
-                });
-            } catch (Exception e) {
-                tmp.delete();
-                main.post(() -> {
-                    status.setText("Download failed for " + dataset.label + ": " + e.getMessage());
-                    setBusy(false);
-                    benchmarkButton.setEnabled(hasAnyDataset());
-                });
-            }
-        });
-    }
-
-    private void downloadRange(Dataset dataset, File tmp) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(VECTOR_URL).openConnection();
-        conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty("Range", "bytes=0-" + (dataset.bytes - 1));
-        conn.setConnectTimeout(30_000);
-        conn.setReadTimeout(60_000);
-        int code = conn.getResponseCode();
-        if (code != 206 && code != 200) {
-            throw new IllegalStateException("HTTP " + code);
+        File tmp = new File(getFilesDir(), dataset.fileName + ".part");
+        long resume = tmp.isFile() ? tmp.length() : 0L;
+        status.setText(resume > 0L
+                ? "Resuming " + dataset.label + " from " + humanBytes(resume)
+                : "Starting background download: " + dataset.label);
+        Intent intent = new Intent(this, DownloadService.class)
+                .setAction(DownloadService.ACTION_START)
+                .putExtra(DownloadService.EXTRA_ID, dataset.id)
+                .putExtra(DownloadService.EXTRA_LABEL, dataset.label)
+                .putExtra(DownloadService.EXTRA_FILE, dataset.fileName)
+                .putExtra(DownloadService.EXTRA_BYTES, dataset.bytes);
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
         }
-        try (InputStream in = conn.getInputStream(); FileOutputStream out = new FileOutputStream(tmp)) {
-            byte[] buf = new byte[1024 * 1024];
-            long total = 0;
-            int n;
-            while ((n = in.read(buf)) != -1 && total < dataset.bytes) {
-                int keep = (int) Math.min(n, dataset.bytes - total);
-                out.write(buf, 0, keep);
-                total += keep;
-                long done = total;
-                main.post(() -> {
-                    progress.setProgress((int) ((done * progress.getMax()) / dataset.bytes));
-                    status.setText(String.format(Locale.US, "Downloading %s: %s / %s",
-                            dataset.label, humanBytes(done), humanBytes(dataset.bytes)));
-                });
-            }
-            if (total != dataset.bytes) {
-                throw new IllegalStateException("short download: " + total + " bytes");
-            }
-        } finally {
-            conn.disconnect();
-        }
+        refreshDownloadState();
     }
 
     private void startBenchmark() {
@@ -323,6 +301,33 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private void refreshDownloadState() {
+        DownloadService.Snapshot snap = DownloadService.snapshot(this);
+        if (snap.running) {
+            setDownloadRunningUi(true);
+            if (snap.totalBytes > 0L) {
+                progress.setProgress((int) ((snap.downloadedBytes * progress.getMax()) / snap.totalBytes));
+            }
+            status.setText(String.format(Locale.US, "Downloading in background: %s %s / %s",
+                    snap.label, humanBytes(snap.downloadedBytes), humanBytes(snap.totalBytes)));
+            return;
+        }
+        setDownloadRunningUi(false);
+        if (snap.error != null && snap.label != null) {
+            progress.setProgress(snap.totalBytes > 0L
+                    ? (int) ((snap.downloadedBytes * progress.getMax()) / snap.totalBytes)
+                    : 0);
+            status.setText("Download paused for " + snap.label + " at "
+                    + humanBytes(snap.downloadedBytes)
+                    + ". Tap the same download button to resume. Last error: " + snap.error);
+            return;
+        }
+        if (snap.done && snap.label != null) {
+            progress.setProgress(progress.getMax());
+            status.setText("Download complete: " + snap.label + " (" + humanBytes(snap.totalBytes) + ")");
+        }
+    }
+
     private String datasetStatus() {
         StringBuilder sb = new StringBuilder("Available datasets:");
         boolean any = false;
@@ -344,6 +349,13 @@ public class MainActivity extends Activity {
             button.setEnabled(!busy);
         }
         benchmarkButton.setEnabled(!busy && hasAnyDataset());
+    }
+
+    private void setDownloadRunningUi(boolean running) {
+        for (Button button : downloadButtons) {
+            button.setEnabled(!running);
+        }
+        benchmarkButton.setEnabled(!running && hasAnyDataset());
     }
 
     private LinearLayout panel() {

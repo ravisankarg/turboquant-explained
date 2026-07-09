@@ -22,6 +22,8 @@ Release artifact: `releases/android/TurboQuantBench-release.apk`
    - `KPI Table`
    - `Latency Notes`
 
+Downloads run in a foreground data-sync service, so they continue when the app is backgrounded or the screen is off. Partial downloads are kept as `.part` files in private app storage. If a transfer stops, tap the same dataset button again and the app resumes from the saved byte offset using an HTTP `Range` request.
+
 The app stores downloaded files in private app storage, so reinstalling with `adb install -r` keeps them as long as the app is not uninstalled or data-cleared.
 
 ## Build
@@ -39,7 +41,8 @@ The app builds `arm64-v8a` only because the benchmark target is modern Android p
 
 ## App Architecture
 
-- `MainActivity.java`: 50K/1M dataset choices, download progress, table rendering.
+- `MainActivity.java`: 50K/1M dataset choices, foreground-service launch, download progress polling, table rendering.
+- `DownloadService.java`: background foreground-service downloader with notification progress and resumable `.part` files.
 - `NativeBench.java`: JNI bridge.
 - `native/src/lib.rs`: benchmark driver, FP32 exact baseline, TurboQuant index build/search, JSON report output.
 - `turbovec/turbovec/src/search.rs`: low-bit NEON path and optimized 8-bit byte path.

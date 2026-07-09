@@ -300,7 +300,7 @@
         <p class="eyebrow">Android benchmark app</p>
         <h2>S25 Ultra vector-search benchmark</h2>
         <p>
-          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. It builds FP32 and TurboQuant indexes on-device and reports recall, index size, RAM, and warm query latency. The app calls Rust through JNI; Java is only used for UI, download progress, and table rendering.
+          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. Downloads run in a foreground data-sync service, continue with the app backgrounded or screen off, and resume from saved partial files. The app builds FP32 and TurboQuant indexes on-device and reports recall, index size, RAM, and warm query latency.
         </p>
         <div class="hero-actions bench-actions">
           <a class="button primary" href="releases/android/TurboQuantBench-release.apk">Download release APK</a>
