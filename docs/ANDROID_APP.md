@@ -24,6 +24,8 @@ Release artifact: `releases/android/TurboQuantBench-release.apk`
 
 Downloads run in a foreground data-sync service, so they continue when the app is backgrounded or the screen is off. Partial downloads are kept as `.part` files in private app storage. If a transfer stops, tap the same dataset button again and the app resumes from the saved byte offset using an HTTP `Range` request.
 
+Benchmarks also run in a foreground service with a partial wake lock, so the native benchmark continues when the app is backgrounded or the screen turns off.
+
 The app stores downloaded files in private app storage, so reinstalling with `adb install -r` keeps them as long as the app is not uninstalled or data-cleared.
 
 ## Build
@@ -43,8 +45,9 @@ The app builds `arm64-v8a` only because the benchmark target is modern Android p
 
 - `MainActivity.java`: 50K/1M dataset choices, foreground-service launch, download progress polling, table rendering.
 - `DownloadService.java`: background foreground-service downloader with notification progress and resumable `.part` files.
+- `BenchmarkService.java`: foreground benchmark runner with a partial wake lock and last-report persistence.
 - `NativeBench.java`: JNI bridge.
-- `native/src/lib.rs`: benchmark driver, FP32 exact baseline, TurboQuant index build/search, JSON report output.
+- `native/src/lib.rs`: benchmark driver, FP32 exact baseline, bundled HNSW baseline, TurboQuant index build/search, JSON report output.
 - `turbovec/turbovec/src/search.rs`: low-bit NEON path and optimized 8-bit byte path.
 - `turbovec/turbovec/src/encode.rs`: quantization and scale correction.
 
@@ -53,6 +56,12 @@ The app builds `arm64-v8a` only because the benchmark target is modern Android p
 ### FP32 exact
 
 Flat brute-force exact scan over all vectors in the selected dataset. It computes dot products over 768 floats and keeps top-10. This is ground truth for R@1/R@10.
+
+### HNSW
+
+Uses the Rust `hnsw_rs` implementation bundled into the app's native library. It builds an HNSW graph with dot distance over normalized vectors and reports the same recall and latency fields as TurboQuant. No phone-side package install is required.
+
+FAISS CPU is not currently bundled in the APK because this checkout does not vendor an Android NDK build of the FAISS C++ library. FAISS GPU is not an Android app target here because FAISS GPU is CUDA/NVIDIA-oriented.
 
 ### 8-bit TurboQuant
 

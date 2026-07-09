@@ -21,11 +21,11 @@ The app does this on-device:
 
 1. Download either the first 50,000 or first 1,000,000 Cohere 768-d vectors from Hugging Face raw `.f32` data.
 2. Downloads continue in a foreground data-sync service if the app is backgrounded or the screen turns off. Interrupted transfers resume from the saved `.part` byte offset.
-3. Tap the benchmark button; it detects every downloaded dataset.
+3. Tap the benchmark button; it detects every downloaded dataset and runs in a foreground service, so the job continues if the app is backgrounded or the screen turns off.
 4. For each available dataset, build an exact FP32 baseline for recall ground truth.
-5. Build TurboQuant indexes at 8, 4, 3, and 2 bits.
+5. Build the bundled HNSW graph baseline and TurboQuant indexes at 8, 4, 3, and 2 bits.
 6. Run 1000 self queries and 1000 deterministic random mixture queries per dataset.
-7. Report one combined KPI table with dataset, vector count, R@1, R@10, index time, prepare time, search latency, ROM, and RAM.
+7. Report one combined KPI table with dataset, vector count, R@1, R@10, index time, prepare time, search latency, ROM, and RAM. Raw f32 database staging is capped at 100 MB while building/searching benchmark methods.
 
 Install the tested APK:
 
@@ -75,8 +75,9 @@ Low-bit 2/3/4 search keeps the original optimized NEON nibble-LUT path.
 
 The fast paths are in Rust/JNI, not Java:
 
-- One JNI call enters native code for the full benchmark.
+- One foreground service enters native code for the full benchmark, so the run survives backgrounding and screen-off periods.
 - Rayon parallelism is used for FP32 baseline and exact truth generation.
+- HNSW is bundled into the same native library via `hnsw_rs`; it does not require any separate install on the phone.
 - TurboQuant search scans a blocked 32-vector layout prepared once by `prepare()`.
 - 2/3/4-bit search uses ARM NEON lookup-table kernels.
 - 8-bit search uses exact byte-code centroid scoring with a NEON-precomputed query LUT.

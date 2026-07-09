@@ -1,3 +1,4 @@
+use hnsw_rs::prelude::{DistDot, Hnsw};
 use jni::objects::{JClass, JString};
 use jni::sys::jstring;
 use jni::JNIEnv;
@@ -7,7 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use turbovec::TurboQuantIndex;
@@ -16,6 +17,10 @@ const DIM: usize = 768;
 const K: usize = 10;
 const SELF_QUERIES: usize = 1_000;
 const RANDOM_QUERIES: usize = 1_000;
+const MAX_DB_RAM_BYTES: usize = 100 * 1024 * 1024;
+const HNSW_M: usize = 32;
+const HNSW_EF_CONSTRUCTION: usize = 200;
+const HNSW_EF_SEARCH: usize = 64;
 
 #[derive(Deserialize)]
 struct DatasetInput {
@@ -113,6 +118,8 @@ fn run(datasets_json: &str, output_dir: &Path) -> Result<String, String> {
             "Random queries are deterministic normalized blends of two base vectors; self queries are the first 1000 base vectors.".to_string(),
             "The cloned turbovec crate was extended here to support 8-bit indexes in addition to 2, 3, and 4 bit.".to_string(),
             "On arm64-v8a, turbovec's aarch64 NEON path is used for 2/3/4-bit search; 8-bit uses an exact block-major byte-code scorer with NEON-built query LUTs.".to_string(),
+            "HNSW is bundled into the native app library via hnsw_rs and uses dot distance over normalized vectors.".to_string(),
+            "FAISS GPU is not included in the Android app because FAISS GPU is CUDA/NVIDIA-oriented; this Android target has no bundled CUDA backend.".to_string(),
         ],
         table,
     };
@@ -124,16 +131,14 @@ fn bench_dataset(dataset: &DatasetInput, output_dir: &Path) -> Result<Vec<Row>, 
         return Err(format!("{} has fewer than {} vectors", dataset.label, SELF_QUERIES));
     }
     let vector_path = Path::new(&dataset.path);
-    let load_start = Instant::now();
-    let vectors = load_vectors(vector_path, dataset.vectors)?;
-    let _load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+    validate_vector_file(vector_path, dataset.vectors)?;
 
-    let self_queries = vectors[..SELF_QUERIES * DIM].to_vec();
-    let random_queries = make_random_queries(&vectors, dataset.vectors, RANDOM_QUERIES);
+    let self_queries = load_vector_range(vector_path, 0, SELF_QUERIES)?;
+    let random_queries = make_random_queries(vector_path, dataset.vectors, RANDOM_QUERIES)?;
 
     let fp32_start = Instant::now();
-    let self_truth = exact_topk(&vectors, dataset.vectors, &self_queries);
-    let random_truth = exact_topk(&vectors, dataset.vectors, &random_queries);
+    let self_truth = exact_topk_file(vector_path, dataset.vectors, &self_queries)?;
+    let random_truth = exact_topk_file(vector_path, dataset.vectors, &random_queries)?;
     let fp32_ms = fp32_start.elapsed().as_secs_f64() * 1000.0;
 
     let mut rows = Vec::new();
@@ -142,11 +147,19 @@ fn bench_dataset(dataset: &DatasetInput, output_dir: &Path) -> Result<Vec<Row>, 
         fp32_ms,
         vector_path.metadata().map(|m| m.len()).unwrap_or(0),
     ));
+    rows.push(bench_hnsw(
+        dataset,
+        vector_path,
+        &self_queries,
+        &random_queries,
+        &self_truth,
+        &random_truth,
+    )?);
     for bit_width in [8usize, 4, 3, 2] {
         rows.push(bench_quant(
             dataset,
             bit_width,
-            &vectors,
+            vector_path,
             &self_queries,
             &random_queries,
             &self_truth,
@@ -157,7 +170,7 @@ fn bench_dataset(dataset: &DatasetInput, output_dir: &Path) -> Result<Vec<Row>, 
     Ok(rows)
 }
 
-fn load_vectors(path: &Path, n: usize) -> Result<Vec<f32>, String> {
+fn validate_vector_file(path: &Path, n: usize) -> Result<(), String> {
     let expected = n
         .checked_mul(DIM)
         .and_then(|x| x.checked_mul(4))
@@ -175,14 +188,43 @@ fn load_vectors(path: &Path, n: usize) -> Result<Vec<f32>, String> {
             meta_len
         ));
     }
+    Ok(())
+}
+
+fn chunk_vectors() -> usize {
+    (MAX_DB_RAM_BYTES / (DIM * 4)).max(1)
+}
+
+fn load_vector_range(path: &Path, start_vector: usize, n: usize) -> Result<Vec<f32>, String> {
+    let byte_offset = start_vector
+        .checked_mul(DIM)
+        .and_then(|x| x.checked_mul(4))
+        .ok_or_else(|| format!("range starts too far into {}", path.display()))?;
+    let byte_len = n
+        .checked_mul(DIM)
+        .and_then(|x| x.checked_mul(4))
+        .ok_or_else(|| format!("range too large: {} vectors", n))?;
     let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut out = Vec::with_capacity(n * DIM);
-    let mut buf = vec![0u8; 1024 * 1024];
+    file.seek(SeekFrom::Start(byte_offset as u64))
+        .map_err(|e| format!("seek {}: {e}", path.display()))?;
+    read_f32_values(&mut file, byte_len, n * DIM, path)
+}
+
+fn read_f32_values(
+    file: &mut File,
+    byte_len: usize,
+    expected_values: usize,
+    path: &Path,
+) -> Result<Vec<f32>, String> {
+    let mut out = Vec::with_capacity(expected_values);
+    let mut buf = vec![0u8; (1024 * 1024).min(byte_len.max(4))];
     let mut carry = [0u8; 4];
     let mut carry_len = 0usize;
-    loop {
+    let mut remaining = byte_len;
+    while remaining > 0 {
+        let take = remaining.min(buf.len());
         let read = file
-            .read(&mut buf)
+            .read(&mut buf[..take])
             .map_err(|e| format!("read {}: {e}", path.display()))?;
         if read == 0 {
             break;
@@ -209,32 +251,36 @@ fn load_vectors(path: &Path, n: usize) -> Result<Vec<f32>, String> {
             carry[..rem].copy_from_slice(&buf[start + body_len..read]);
             carry_len = rem;
         }
+        remaining -= read;
     }
-    if carry_len != 0 || out.len() != n * DIM {
+    if carry_len != 0 || out.len() != expected_values {
         return Err(format!(
             "decoded {} f32 values from {}, expected {}",
             out.len(),
             path.display(),
-            n * DIM
+            expected_values
         ));
     }
     Ok(out)
 }
 
-fn make_random_queries(vectors: &[f32], n: usize, nq: usize) -> Vec<f32> {
+fn make_random_queries(path: &Path, n: usize, nq: usize) -> Result<Vec<f32>, String> {
     let mut rng = StdRng::seed_from_u64(0x5451_2026);
+    let mut pairs = Vec::with_capacity(nq);
+    for _ in 0..nq {
+        pairs.push((rng.gen_range(0..n), rng.gen_range(0..n), rng.gen_range(0.15..0.85)));
+    }
     let mut out = vec![0.0f32; nq * DIM];
-    for q in 0..nq {
-        let a = rng.gen_range(0..n);
-        let b = rng.gen_range(0..n);
-        let alpha: f32 = rng.gen_range(0.15..0.85);
+    for (q, (a, b, alpha)) in pairs.into_iter().enumerate() {
+        let va = load_vector_range(path, a, 1)?;
+        let vb = load_vector_range(path, b, 1)?;
         let row = &mut out[q * DIM..(q + 1) * DIM];
         for d in 0..DIM {
-            row[d] = alpha * vectors[a * DIM + d] + (1.0 - alpha) * vectors[b * DIM + d];
+            row[d] = alpha * va[d] + (1.0 - alpha) * vb[d];
         }
         normalize(row);
     }
-    out
+    Ok(out)
 }
 
 fn normalize(v: &mut [f32]) {
@@ -246,18 +292,49 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
-fn exact_topk(vectors: &[f32], n: usize, queries: &[f32]) -> Vec<[usize; K]> {
-    queries
-        .par_chunks_exact(DIM)
-        .map(|q| {
-            let mut heap = [Hit {
-                score: f32::NEG_INFINITY,
-                idx: usize::MAX,
-            }; K];
-            for i in 0..n {
-                let score = dot(q, &vectors[i * DIM..(i + 1) * DIM]);
-                insert_hit(&mut heap, Hit { score, idx: i });
+fn normalized_copy(values: &[f32]) -> Vec<f32> {
+    let mut out = values.to_vec();
+    for row in out.chunks_exact_mut(DIM) {
+        normalize_for_hnsw_dot(row);
+    }
+    out
+}
+
+fn normalize_for_hnsw_dot(v: &mut [f32]) {
+    normalize(v);
+    for x in v {
+        *x *= 0.999_999;
+    }
+}
+
+fn exact_topk_file(path: &Path, n: usize, queries: &[f32]) -> Result<Vec<[usize; K]>, String> {
+    let nq = queries.len() / DIM;
+    let mut heaps = vec![
+        [Hit {
+            score: f32::NEG_INFINITY,
+            idx: usize::MAX,
+        }; K];
+        nq
+    ];
+    for_each_vector_chunk(path, n, |base, chunk| {
+        heaps.par_iter_mut().enumerate().for_each(|(qi, heap)| {
+            let q = &queries[qi * DIM..(qi + 1) * DIM];
+            for (local_idx, v) in chunk.chunks_exact(DIM).enumerate() {
+                let score = dot(q, v);
+                insert_hit(
+                    heap,
+                    Hit {
+                        score,
+                        idx: base + local_idx,
+                    },
+                );
             }
+        });
+        Ok(())
+    })?;
+    Ok(heaps
+        .into_iter()
+        .map(|mut heap| {
             heap.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
             let mut ids = [0usize; K];
             for i in 0..K {
@@ -265,7 +342,7 @@ fn exact_topk(vectors: &[f32], n: usize, queries: &[f32]) -> Vec<[usize; K]> {
             }
             ids
         })
-        .collect()
+        .collect())
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -293,7 +370,7 @@ fn insert_hit(heap: &mut [Hit; K], hit: Hit) {
 fn bench_quant(
     dataset: &DatasetInput,
     bit_width: usize,
-    vectors: &[f32],
+    vector_path: &Path,
     self_queries: &[f32],
     random_queries: &[f32],
     self_truth: &[[usize; K]],
@@ -303,7 +380,10 @@ fn bench_quant(
     let rss_before = rss_kb();
     let index_start = Instant::now();
     let mut index = TurboQuantIndex::new(DIM, bit_width).map_err(|e| format!("{e:?}"))?;
-    index.add(vectors);
+    for_each_vector_chunk(vector_path, dataset.vectors, |_, chunk| {
+        index.add(&chunk);
+        Ok(())
+    })?;
     let index_ms = index_start.elapsed().as_secs_f64() * 1000.0;
 
     let prepare_start = Instant::now();
@@ -350,6 +430,101 @@ fn bench_quant(
         index_rom: human_bytes(rom),
         ram_delta: human_kb(rss_after.saturating_sub(rss_before)),
     })
+}
+
+fn bench_hnsw(
+    dataset: &DatasetInput,
+    vector_path: &Path,
+    self_queries: &[f32],
+    random_queries: &[f32],
+    self_truth: &[[usize; K]],
+    random_truth: &[[usize; K]],
+) -> Result<Row, String> {
+    let rss_before = rss_kb();
+    let index_start = Instant::now();
+    let nb_layer = 16usize
+        .min((dataset.vectors as f32).ln().trunc().max(1.0) as usize)
+        .max(1);
+    let hnsw = Hnsw::<f32, DistDot>::new(
+        HNSW_M,
+        dataset.vectors,
+        nb_layer,
+        HNSW_EF_CONSTRUCTION,
+        DistDot {},
+    );
+    for_each_vector_chunk(vector_path, dataset.vectors, |base, mut chunk| {
+        for row in chunk.chunks_exact_mut(DIM) {
+            normalize_for_hnsw_dot(row);
+        }
+        for (local_idx, row) in chunk.chunks_exact(DIM).enumerate() {
+            hnsw.insert((row, base + local_idx));
+        }
+        Ok(())
+    })?;
+    let index_ms = index_start.elapsed().as_secs_f64() * 1000.0;
+
+    let self_hnsw_queries = normalized_copy(self_queries);
+    let random_hnsw_queries = normalized_copy(random_queries);
+
+    let self_start = Instant::now();
+    let self_indices = search_hnsw(&hnsw, &self_hnsw_queries);
+    let self_ms = self_start.elapsed().as_secs_f64() * 1000.0;
+
+    let random_start = Instant::now();
+    let random_indices = search_hnsw(&hnsw, &random_hnsw_queries);
+    let random_ms = random_start.elapsed().as_secs_f64() * 1000.0;
+    let rss_after = rss_kb();
+
+    let (self_r1, self_r10) = recall(&self_indices, self_truth);
+    let (random_r1, random_r10) = recall(&random_indices, random_truth);
+    let total_q = (SELF_QUERIES + RANDOM_QUERIES) as f64;
+    let us_per_query = ((self_ms + random_ms) * 1000.0) / total_q;
+
+    Ok(Row {
+        dataset: dataset.label.clone(),
+        vectors: human_count(dataset.vectors),
+        index: "hnsw_rs".to_string(),
+        bits: "graph".to_string(),
+        self_r1: pct(self_r1),
+        self_r10: pct(self_r10),
+        random_r1: pct(random_r1),
+        random_r10: pct(random_r10),
+        index_ms: format!("{:.1}", index_ms),
+        prepare_ms: "0.0".to_string(),
+        write_ms: "0.0".to_string(),
+        self_search_ms: format!("{:.1}", self_ms),
+        random_search_ms: format!("{:.1}", random_ms),
+        us_per_query: format!("{:.1}", us_per_query),
+        index_rom: "n/a".to_string(),
+        ram_delta: human_kb(rss_after.saturating_sub(rss_before)),
+    })
+}
+
+fn search_hnsw(index: &Hnsw<f32, DistDot>, queries: &[f32]) -> Vec<i64> {
+    let mut out = vec![-1i64; (queries.len() / DIM) * K];
+    out.par_chunks_exact_mut(K)
+        .zip(queries.par_chunks_exact(DIM))
+        .for_each(|(dst, q)| {
+            let neighbours = index.search(q, K, HNSW_EF_SEARCH);
+            for (i, neighbour) in neighbours.into_iter().take(K).enumerate() {
+                dst[i] = neighbour.get_origin_id() as i64;
+            }
+        });
+    out
+}
+
+fn for_each_vector_chunk<F>(path: &Path, n: usize, mut f: F) -> Result<(), String>
+where
+    F: FnMut(usize, Vec<f32>) -> Result<(), String>,
+{
+    let per_chunk = chunk_vectors();
+    let mut base = 0usize;
+    while base < n {
+        let take = (n - base).min(per_chunk);
+        f(base, load_vector_range(path, base, take)?)?;
+        base += take;
+    }
+    Ok(())
 }
 
 fn fp32_row(dataset: &DatasetInput, fp32_ms: f64, raw_bytes: u64) -> Row {

@@ -23,8 +23,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int DIM = 768;
@@ -33,7 +31,6 @@ public class MainActivity extends Activity {
             new Dataset("cohere-1m", "Cohere 1M vectors", "cohere_1m_768.f32", 1_000_000)
     };
 
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Button> downloadButtons = new ArrayList<>();
     private Button benchmarkButton;
@@ -44,6 +41,13 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             refreshDownloadState();
+            main.postDelayed(this, 1000L);
+        }
+    };
+    private final Runnable benchmarkPoller = new Runnable() {
+        @Override
+        public void run() {
+            refreshBenchmarkState();
             main.postDelayed(this, 1000L);
         }
     };
@@ -59,18 +63,20 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         main.post(downloadPoller);
+        main.post(benchmarkPoller);
     }
 
     @Override
     protected void onPause() {
         main.removeCallbacks(downloadPoller);
+        main.removeCallbacks(benchmarkPoller);
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         main.removeCallbacks(downloadPoller);
-        worker.shutdownNow();
+        main.removeCallbacks(benchmarkPoller);
         super.onDestroy();
     }
 
@@ -179,25 +185,18 @@ public class MainActivity extends Activity {
         }
         setBusy(true);
         results.removeAllViews();
-        status.setText("Benchmark running for " + datasets.length()
-                + " dataset(s). Each method uses 1000 self-query and 1000 random-query searches.");
-        worker.execute(() -> {
-            try {
-                String json = NativeBench.runBenchmark(datasets.toString(), getFilesDir().getAbsolutePath());
-                main.post(() -> {
-                    status.setText("Benchmark complete");
-                    renderReport(json);
-                    setBusy(false);
-                    benchmarkButton.setEnabled(hasAnyDataset());
-                });
-            } catch (Throwable t) {
-                main.post(() -> {
-                    status.setText("Benchmark failed: " + t.getMessage());
-                    setBusy(false);
-                    benchmarkButton.setEnabled(hasAnyDataset());
-                });
-            }
-        });
+        status.setText("Benchmark starting in foreground service for " + datasets.length()
+                + " dataset(s). It continues in background and with the screen off.");
+        Intent intent = new Intent(this, BenchmarkService.class)
+                .setAction(BenchmarkService.ACTION_START)
+                .putExtra(BenchmarkService.EXTRA_DATASETS_JSON, datasets.toString())
+                .putExtra(BenchmarkService.EXTRA_OUTPUT_DIR, getFilesDir().getAbsolutePath());
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        refreshBenchmarkState();
     }
 
     private JSONArray availableDatasetsJson() {
@@ -302,6 +301,10 @@ public class MainActivity extends Activity {
     }
 
     private void refreshDownloadState() {
+        BenchmarkService.Snapshot benchmark = BenchmarkService.snapshot(this);
+        if (benchmark.running || benchmark.done) {
+            return;
+        }
         DownloadService.Snapshot snap = DownloadService.snapshot(this);
         if (snap.running) {
             setDownloadRunningUi(true);
@@ -325,6 +328,29 @@ public class MainActivity extends Activity {
         if (snap.done && snap.label != null) {
             progress.setProgress(progress.getMax());
             status.setText("Download complete: " + snap.label + " (" + humanBytes(snap.totalBytes) + ")");
+        }
+    }
+
+    private void refreshBenchmarkState() {
+        BenchmarkService.Snapshot snap = BenchmarkService.snapshot(this);
+        if (snap.running) {
+            setBusy(true);
+            progress.setIndeterminate(true);
+            status.setText(snap.status != null
+                    ? snap.status
+                    : "Benchmark running in background. It continues with the screen off.");
+            return;
+        }
+        progress.setIndeterminate(false);
+        if (snap.done) {
+            setBusy(false);
+            benchmarkButton.setEnabled(hasAnyDataset());
+            if (snap.error != null) {
+                status.setText("Benchmark failed: " + snap.error);
+            } else if (snap.resultJson != null) {
+                status.setText("Benchmark complete");
+                renderReport(snap.resultJson);
+            }
         }
     }
 
