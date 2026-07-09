@@ -300,7 +300,7 @@
         <p class="eyebrow">Android benchmark app</p>
         <h2>S25 Ultra vector-search benchmark</h2>
         <p>
-          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. Downloads run in a foreground data-sync service, continue with the app backgrounded or screen off, and resume from saved partial files. The app builds FP32 and TurboQuant indexes on-device and reports recall, index size, RAM, and warm query latency.
+          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app builds FP32 exact, bundled HNSW, and TurboQuant indexes on-device, caps raw database staging at 100 MB, and reports recall, index size, RAM, and warm query latency.
         </p>
         <div class="hero-actions bench-actions">
           <a class="button primary" href="releases/android/TurboQuantBench-release.apk">Download release APK</a>
@@ -391,6 +391,8 @@
           <dl>
             <dt>FP32 exact</dt>
             <dd>Brute-force exact dot-product scan over all vectors in the selected dataset. It is used as ground truth for recall.</dd>
+            <dt>HNSW</dt>
+            <dd>Uses the Rust hnsw_rs graph implementation bundled into the APK native library; no phone-side package install is required.</dd>
             <dt>8-bit TurboQuant</dt>
             <dd>Uses the extended Rust 8-bit codebook, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer.</dd>
             <dt>4/3/2-bit TurboQuant</dt>
@@ -408,7 +410,7 @@
           <article>
             <span class="step">1</span>
             <h3>Rust JNI, not Java loops</h3>
-            <p>The benchmark enters native Rust once. Dot products, quantization, top-k heaps, blocked layout, and search kernels run in optimized release Rust.</p>
+            <p>A foreground service enters native Rust once. Dot products, HNSW graph search, quantization, top-k heaps, blocked layout, and search kernels run in optimized release Rust.</p>
           </article>
           <article>
             <span class="step">2</span>
