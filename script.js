@@ -15,6 +15,8 @@ const polarPairDequant = [
 ];
 const androidBenchRows = [
   {
+    dataset: "Cohere 50K",
+    vectors: "50K",
     method: "exact fp32",
     bits: 32,
     selfR1: "100.00%",
@@ -32,6 +34,8 @@ const androidBenchRows = [
     ramDelta: "146.5 MB"
   },
   {
+    dataset: "Cohere 50K",
+    vectors: "50K",
     method: "turbovec",
     bits: 8,
     selfR1: "100.00%",
@@ -49,6 +53,8 @@ const androidBenchRows = [
     ramDelta: "124.4 MB"
   },
   {
+    dataset: "Cohere 50K",
+    vectors: "50K",
     method: "turbovec",
     bits: 4,
     selfR1: "100.00%",
@@ -66,6 +72,8 @@ const androidBenchRows = [
     ramDelta: "78.5 MB"
   },
   {
+    dataset: "Cohere 50K",
+    vectors: "50K",
     method: "turbovec",
     bits: 3,
     selfR1: "100.00%",
@@ -83,6 +91,8 @@ const androidBenchRows = [
     ramDelta: "34.4 MB"
   },
   {
+    dataset: "Cohere 50K",
+    vectors: "50K",
     method: "turbovec",
     bits: 2,
     selfR1: "99.60%",
@@ -330,6 +340,8 @@ function renderAndroidBench() {
     table.innerHTML = androidBenchRows.map(row => `
       <tr>
         <td class="method">${row.method}</td>
+        <td>${row.dataset}</td>
+        <td>${row.vectors}</td>
         <td>${row.bits}</td>
         <td>${row.selfR1}</td>
         <td>${row.selfR10}</td>

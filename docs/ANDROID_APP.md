@@ -13,15 +13,16 @@ Release artifact: `releases/android/TurboQuantBench-release.apk`
    ```
 
 2. Open `TurboQuant Bench`.
-3. Tap `Download 50K Cohere vectors`.
-4. Wait for the 146.5 MB download to finish.
-5. Tap `Benchmark`.
-6. Read the native UI table:
+3. Tap either `Download Cohere 50K vectors (146.5 MB)` for the quick dataset or `Download Cohere 1M vectors (2.86 GB)` for the full raw slice.
+4. Wait for download progress to finish.
+5. Tap `Benchmark available datasets`.
+6. The app checks which datasets are present and benchmarks all of them in one run.
+7. Read the native UI table:
    - `Summary`
    - `KPI Table`
    - `Latency Notes`
 
-The app stores the downloaded file in private app storage, so reinstalling with `adb install -r` keeps it as long as the app is not uninstalled or data-cleared.
+The app stores downloaded files in private app storage, so reinstalling with `adb install -r` keeps them as long as the app is not uninstalled or data-cleared.
 
 ## Build
 
@@ -38,7 +39,7 @@ The app builds `arm64-v8a` only because the benchmark target is modern Android p
 
 ## App Architecture
 
-- `MainActivity.java`: UI, download progress, table rendering.
+- `MainActivity.java`: 50K/1M dataset choices, download progress, table rendering.
 - `NativeBench.java`: JNI bridge.
 - `native/src/lib.rs`: benchmark driver, FP32 exact baseline, TurboQuant index build/search, JSON report output.
 - `turbovec/turbovec/src/search.rs`: low-bit NEON path and optimized 8-bit byte path.
@@ -48,7 +49,7 @@ The app builds `arm64-v8a` only because the benchmark target is modern Android p
 
 ### FP32 exact
 
-Flat brute-force exact scan over all 50,000 vectors. It computes dot products over 768 floats and keeps top-10. This is ground truth for R@1/R@10.
+Flat brute-force exact scan over all vectors in the selected dataset. It computes dot products over 768 floats and keeps top-10. This is ground truth for R@1/R@10.
 
 ### 8-bit TurboQuant
 

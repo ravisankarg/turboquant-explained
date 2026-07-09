@@ -19,11 +19,12 @@ https://ravisankarg.github.io/turboquant-explained/
 
 The app does this on-device:
 
-1. Download first 50,000 Cohere 768-d vectors from Hugging Face raw `.f32` data.
-2. Build an exact FP32 baseline for recall ground truth.
-3. Build TurboQuant indexes at 8, 4, 3, and 2 bits.
-4. Run 1000 self queries and 1000 deterministic random mixture queries.
-5. Report R@1, R@10, index time, prepare time, search latency, ROM, and RAM.
+1. Download either the first 50,000 or first 1,000,000 Cohere 768-d vectors from Hugging Face raw `.f32` data.
+2. Tap the benchmark button; it detects every downloaded dataset.
+3. For each available dataset, build an exact FP32 baseline for recall ground truth.
+4. Build TurboQuant indexes at 8, 4, 3, and 2 bits.
+5. Run 1000 self queries and 1000 deterministic random mixture queries per dataset.
+6. Report one combined KPI table with dataset, vector count, R@1, R@10, index time, prepare time, search latency, ROM, and RAM.
 
 Install the tested APK:
 
@@ -46,7 +47,7 @@ If `app/release.keystore` is absent, the Gradle build falls back to debug signin
 
 ## S25 Ultra Results
 
-Dataset: first 50K vectors from `YoKONCy/Cohere-1M-wikipedia-768d`, 768 dimensions.
+Measured dataset: first 50K vectors from `YoKONCy/Cohere-1M-wikipedia-768d`, 768 dimensions. The app can now also download and benchmark the first 1M vectors when enough storage and runtime are available on the phone.
 
 | Method | Bits | Self R@1 | Self R@10 | Random R@1 | Random R@10 | Index ms | Prep ms | Write ms | Self ms | Random ms | us/query | ROM | RAM delta |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

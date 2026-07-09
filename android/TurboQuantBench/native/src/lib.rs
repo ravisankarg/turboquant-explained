@@ -4,18 +4,26 @@ use jni::JNIEnv;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use turbovec::TurboQuantIndex;
 
 const DIM: usize = 768;
-const N: usize = 50_000;
 const K: usize = 10;
 const SELF_QUERIES: usize = 1_000;
 const RANDOM_QUERIES: usize = 1_000;
+
+#[derive(Deserialize)]
+struct DatasetInput {
+    id: String,
+    label: String,
+    path: String,
+    vectors: usize,
+}
 
 #[derive(Clone, Copy)]
 struct Hit {
@@ -25,6 +33,8 @@ struct Hit {
 
 #[derive(Serialize)]
 struct Row {
+    dataset: String,
+    vectors: String,
     index: String,
     bits: String,
     self_r1: String,
@@ -43,12 +53,10 @@ struct Row {
 
 #[derive(Serialize)]
 struct Report {
-    dataset: String,
+    datasets: String,
     dim: usize,
-    base_vectors: usize,
     self_queries: usize,
     random_queries: usize,
-    fp32_exact_ms: String,
     notes: Vec<String>,
     table: Vec<Row>,
 }
@@ -57,19 +65,19 @@ struct Report {
 pub extern "system" fn Java_com_turboquant_benchmark_NativeBench_runBenchmark(
     mut env: JNIEnv,
     _class: JClass,
-    vector_path: JString,
+    datasets_json: JString,
     output_dir: JString,
 ) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let vector_path: String = env
-            .get_string(&vector_path)
+        let datasets_json: String = env
+            .get_string(&datasets_json)
             .map_err(|e| e.to_string())?
             .into();
         let output_dir: String = env
             .get_string(&output_dir)
             .map_err(|e| e.to_string())?
             .into();
-        run(Path::new(&vector_path), Path::new(&output_dir))
+        run(&datasets_json, Path::new(&output_dir))
     }));
 
     let text = match result {
@@ -80,23 +88,63 @@ pub extern "system" fn Java_com_turboquant_benchmark_NativeBench_runBenchmark(
     env.new_string(text).expect("new Java string").into_raw()
 }
 
-fn run(vector_path: &Path, output_dir: &Path) -> Result<String, String> {
+fn run(datasets_json: &str, output_dir: &Path) -> Result<String, String> {
+    let datasets: Vec<DatasetInput> =
+        serde_json::from_str(datasets_json).map_err(|e| format!("parse datasets: {e}"))?;
+    if datasets.is_empty() {
+        return Err("no downloaded datasets were supplied".to_string());
+    }
+
+    let mut table = Vec::new();
+    let mut labels = Vec::new();
+    for dataset in datasets {
+        let mut rows = bench_dataset(&dataset, output_dir)?;
+        labels.push(format!("{} ({})", dataset.label, human_count(dataset.vectors)));
+        table.append(&mut rows);
+    }
+
+    let report = Report {
+        datasets: labels.join(", "),
+        dim: DIM,
+        self_queries: SELF_QUERIES,
+        random_queries: RANDOM_QUERIES,
+        notes: vec![
+            "Recall is measured against exact FP32 top-10 over the same dataset size.".to_string(),
+            "Random queries are deterministic normalized blends of two base vectors; self queries are the first 1000 base vectors.".to_string(),
+            "The cloned turbovec crate was extended here to support 8-bit indexes in addition to 2, 3, and 4 bit.".to_string(),
+            "On arm64-v8a, turbovec's aarch64 NEON path is used for 2/3/4-bit search; 8-bit uses an exact block-major byte-code scorer with NEON-built query LUTs.".to_string(),
+        ],
+        table,
+    };
+    serde_json::to_string(&report).map_err(|e| format!("serialize report: {e}"))
+}
+
+fn bench_dataset(dataset: &DatasetInput, output_dir: &Path) -> Result<Vec<Row>, String> {
+    if dataset.vectors < SELF_QUERIES {
+        return Err(format!("{} has fewer than {} vectors", dataset.label, SELF_QUERIES));
+    }
+    let vector_path = Path::new(&dataset.path);
     let load_start = Instant::now();
-    let vectors = load_vectors(vector_path)?;
-    let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+    let vectors = load_vectors(vector_path, dataset.vectors)?;
+    let _load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
 
     let self_queries = vectors[..SELF_QUERIES * DIM].to_vec();
-    let random_queries = make_random_queries(&vectors, RANDOM_QUERIES);
+    let random_queries = make_random_queries(&vectors, dataset.vectors, RANDOM_QUERIES);
 
     let fp32_start = Instant::now();
-    let self_truth = exact_topk(&vectors, &self_queries);
-    let random_truth = exact_topk(&vectors, &random_queries);
+    let self_truth = exact_topk(&vectors, dataset.vectors, &self_queries);
+    let random_truth = exact_topk(&vectors, dataset.vectors, &random_queries);
     let fp32_ms = fp32_start.elapsed().as_secs_f64() * 1000.0;
 
     let mut rows = Vec::new();
-    rows.push(fp32_row(fp32_ms, vector_path.metadata().map(|m| m.len()).unwrap_or(0)));
+    rows.push(fp32_row(
+        dataset,
+        fp32_ms,
+        vector_path.metadata().map(|m| m.len()).unwrap_or(0),
+    ));
     for bit_width in [8usize, 4, 3, 2] {
         rows.push(bench_quant(
+            dataset,
             bit_width,
             &vectors,
             &self_queries,
@@ -106,50 +154,79 @@ fn run(vector_path: &Path, output_dir: &Path) -> Result<String, String> {
             output_dir,
         )?);
     }
-
-    let report = Report {
-        dataset: format!("Cohere train first 50K raw f32, loaded in {:.1} ms", load_ms),
-        dim: DIM,
-        base_vectors: N,
-        self_queries: SELF_QUERIES,
-        random_queries: RANDOM_QUERIES,
-        fp32_exact_ms: format!("{:.1}", fp32_ms),
-        notes: vec![
-            "Recall is measured against exact FP32 top-10 over the same 50K vectors.".to_string(),
-            "Random queries are deterministic normalized random vectors; self queries are the first 1000 base vectors.".to_string(),
-            "The cloned turbovec crate was extended here to support 8-bit indexes in addition to 2, 3, and 4 bit.".to_string(),
-            "On arm64-v8a, turbovec's aarch64 NEON path is used for 2/3/4-bit search; 8-bit uses an exact block-major byte-code scorer with NEON-built query LUTs.".to_string(),
-        ],
-        table: rows,
-    };
-    serde_json::to_string(&report).map_err(|e| format!("serialize report: {e}"))
+    Ok(rows)
 }
 
-fn load_vectors(path: &Path) -> Result<Vec<f32>, String> {
-    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let expected = N * DIM * 4;
-    if bytes.len() != expected {
+fn load_vectors(path: &Path, n: usize) -> Result<Vec<f32>, String> {
+    let expected = n
+        .checked_mul(DIM)
+        .and_then(|x| x.checked_mul(4))
+        .ok_or_else(|| format!("dataset too large: {} vectors", n))?;
+    let meta_len = path
+        .metadata()
+        .map_err(|e| format!("metadata {}: {e}", path.display()))?
+        .len() as usize;
+    if meta_len != expected {
         return Err(format!(
             "expected {} bytes for {}x{} f32 vectors, got {}",
             expected,
-            N,
+            n,
             DIM,
-            bytes.len()
+            meta_len
         ));
     }
-    let mut out = Vec::with_capacity(N * DIM);
-    for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut out = Vec::with_capacity(n * DIM);
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut carry = [0u8; 4];
+    let mut carry_len = 0usize;
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        let mut start = 0usize;
+        if carry_len > 0 {
+            let need = 4 - carry_len;
+            if read < need {
+                carry[carry_len..carry_len + read].copy_from_slice(&buf[..read]);
+                carry_len += read;
+                continue;
+            }
+            carry[carry_len..4].copy_from_slice(&buf[..need]);
+            out.push(f32::from_le_bytes(carry));
+            carry_len = 0;
+            start = need;
+        }
+        let body_len = ((read - start) / 4) * 4;
+        for chunk in buf[start..start + body_len].chunks_exact(4) {
+            out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        let rem = read - start - body_len;
+        if rem > 0 {
+            carry[..rem].copy_from_slice(&buf[start + body_len..read]);
+            carry_len = rem;
+        }
+    }
+    if carry_len != 0 || out.len() != n * DIM {
+        return Err(format!(
+            "decoded {} f32 values from {}, expected {}",
+            out.len(),
+            path.display(),
+            n * DIM
+        ));
     }
     Ok(out)
 }
 
-fn make_random_queries(vectors: &[f32], nq: usize) -> Vec<f32> {
+fn make_random_queries(vectors: &[f32], n: usize, nq: usize) -> Vec<f32> {
     let mut rng = StdRng::seed_from_u64(0x5451_2026);
     let mut out = vec![0.0f32; nq * DIM];
     for q in 0..nq {
-        let a = rng.gen_range(0..N);
-        let b = rng.gen_range(0..N);
+        let a = rng.gen_range(0..n);
+        let b = rng.gen_range(0..n);
         let alpha: f32 = rng.gen_range(0.15..0.85);
         let row = &mut out[q * DIM..(q + 1) * DIM];
         for d in 0..DIM {
@@ -169,7 +246,7 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
-fn exact_topk(vectors: &[f32], queries: &[f32]) -> Vec<[usize; K]> {
+fn exact_topk(vectors: &[f32], n: usize, queries: &[f32]) -> Vec<[usize; K]> {
     queries
         .par_chunks_exact(DIM)
         .map(|q| {
@@ -177,7 +254,7 @@ fn exact_topk(vectors: &[f32], queries: &[f32]) -> Vec<[usize; K]> {
                 score: f32::NEG_INFINITY,
                 idx: usize::MAX,
             }; K];
-            for i in 0..N {
+            for i in 0..n {
                 let score = dot(q, &vectors[i * DIM..(i + 1) * DIM]);
                 insert_hit(&mut heap, Hit { score, idx: i });
             }
@@ -214,6 +291,7 @@ fn insert_hit(heap: &mut [Hit; K], hit: Hit) {
 }
 
 fn bench_quant(
+    dataset: &DatasetInput,
     bit_width: usize,
     vectors: &[f32],
     self_queries: &[f32],
@@ -232,7 +310,7 @@ fn bench_quant(
     index.prepare();
     let prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
 
-    let path = index_path(output_dir, bit_width);
+    let path = index_path(output_dir, &dataset.id, bit_width);
     let write_start = Instant::now();
     index
         .write(&path)
@@ -255,6 +333,8 @@ fn bench_quant(
     let us_per_query = ((self_ms + random_ms) * 1000.0) / total_q;
 
     Ok(Row {
+        dataset: dataset.label.clone(),
+        vectors: human_count(dataset.vectors),
         index: "turbovec".to_string(),
         bits: bit_width.to_string(),
         self_r1: pct(self_r1),
@@ -272,9 +352,11 @@ fn bench_quant(
     })
 }
 
-fn fp32_row(fp32_ms: f64, raw_bytes: u64) -> Row {
+fn fp32_row(dataset: &DatasetInput, fp32_ms: f64, raw_bytes: u64) -> Row {
     let per_query = (fp32_ms * 1000.0) / ((SELF_QUERIES + RANDOM_QUERIES) as f64);
     Row {
+        dataset: dataset.label.clone(),
+        vectors: human_count(dataset.vectors),
         index: "exact fp32".to_string(),
         bits: "32".to_string(),
         self_r1: "100.00%".to_string(),
@@ -308,8 +390,8 @@ fn recall(indices: &[i64], truth: &[[usize; K]]) -> (f64, f64) {
     (r1 as f64 / n, r10 as f64 / n)
 }
 
-fn index_path(output_dir: &Path, bit_width: usize) -> PathBuf {
-    output_dir.join(format!("cohere_50k_turbovec_{}bit.tv", bit_width))
+fn index_path(output_dir: &Path, dataset_id: &str, bit_width: usize) -> PathBuf {
+    output_dir.join(format!("{}_turbovec_{}bit.tv", dataset_id, bit_width))
 }
 
 fn rss_kb() -> u64 {
@@ -345,5 +427,15 @@ fn human_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+fn human_count(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }

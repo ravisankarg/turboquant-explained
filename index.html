@@ -300,7 +300,7 @@
         <p class="eyebrow">Android benchmark app</p>
         <h2>S25 Ultra vector-search benchmark</h2>
         <p>
-          This repo now includes a native Android app that downloads the first 50,000 Cohere 768-dimensional vectors, builds FP32 and TurboQuant indexes on-device, and reports recall, index size, RAM, and warm query latency. The app calls Rust through JNI; Java is only used for UI, download progress, and table rendering.
+          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. It builds FP32 and TurboQuant indexes on-device and reports recall, index size, RAM, and warm query latency. The app calls Rust through JNI; Java is only used for UI, download progress, and table rendering.
         </p>
         <div class="hero-actions bench-actions">
           <a class="button primary" href="releases/android/TurboQuantBench-release.apk">Download release APK</a>
@@ -332,6 +332,8 @@
           <thead>
             <tr>
               <th>Method</th>
+              <th>Dataset</th>
+              <th>Vectors</th>
               <th>Bits</th>
               <th>Self R@1</th>
               <th>Self R@10</th>
@@ -375,7 +377,7 @@
             <dt>Self R@1 / Self R@10</dt>
             <dd>Recall when the query is one of the stored base vectors. R@1 means the exact vector is ranked first; R@10 means it appears anywhere in top 10.</dd>
             <dt>Random R@1 / Random R@10</dt>
-            <dd>Recall for deterministic normalized random mixture queries, compared against exact FP32 top-10 over the same 50K vectors.</dd>
+            <dd>Recall for deterministic normalized random mixture queries, compared against exact FP32 top-10 over the same dataset size.</dd>
             <dt>Index ms</dt>
             <dd>Time to add vectors, rotate, calibrate, quantize, and store the in-memory quantized index.</dd>
             <dt>Prep ms</dt>
@@ -388,7 +390,7 @@
           <h3>What each method does</h3>
           <dl>
             <dt>FP32 exact</dt>
-            <dd>Brute-force exact dot-product scan over all 50K vectors. It is used as ground truth for recall.</dd>
+            <dd>Brute-force exact dot-product scan over all vectors in the selected dataset. It is used as ground truth for recall.</dd>
             <dt>8-bit TurboQuant</dt>
             <dd>Uses the extended Rust 8-bit codebook, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer.</dd>
             <dt>4/3/2-bit TurboQuant</dt>

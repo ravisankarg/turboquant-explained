@@ -2,7 +2,9 @@
 
 Device: Samsung Galaxy S25 Ultra class device reported by ADB as `SM_S938B`.
 
-Dataset: first 50,000 vectors from `YoKONCy/Cohere-1M-wikipedia-768d`.
+Measured dataset: first 50,000 vectors from `YoKONCy/Cohere-1M-wikipedia-768d`.
+
+The app can also download the first 1,000,000 vectors and will benchmark both 50K and 1M in one combined KPI table when both files are present. The table below is the measured S25 Ultra 50K run.
 
 Vector shape: `50,000 x 768` FP32.
 
@@ -25,6 +27,8 @@ Queries:
 
 ## Header Definitions
 
+- `Dataset`: downloaded vector slice, for example Cohere 50K or Cohere 1M.
+- `Vectors`: number of base vectors in that row.
 - `Method`: search implementation.
 - `Bits`: bits per vector coordinate.
 - `Self R@1`: percent of self queries where the original vector is ranked first.

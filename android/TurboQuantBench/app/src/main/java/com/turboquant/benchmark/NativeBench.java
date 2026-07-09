@@ -7,5 +7,5 @@ final class NativeBench {
 
     private NativeBench() {}
 
-    static native String runBenchmark(String vectorPath, String outputDir);
+    static native String runBenchmark(String datasetsJson, String outputDir);
 }

@@ -5,7 +5,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.Button;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -23,6 +22,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,22 +31,23 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final String VECTOR_URL =
             "https://huggingface.co/datasets/YoKONCy/Cohere-1M-wikipedia-768d/resolve/main/cohere_train.f32";
-    private static final long VECTOR_BYTES = 50_000L * 768L * 4L;
-    private static final String VECTOR_FILE = "cohere_50k_768.f32";
+    private static final int DIM = 768;
+    private static final Dataset[] DATASETS = new Dataset[]{
+            new Dataset("cohere-50k", "Cohere 50K vectors", "cohere_50k_768.f32", 50_000),
+            new Dataset("cohere-1m", "Cohere 1M vectors", "cohere_1m_768.f32", 1_000_000)
+    };
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
-    private Button downloadButton;
+    private final List<Button> downloadButtons = new ArrayList<>();
     private Button benchmarkButton;
     private ProgressBar progress;
     private TextView status;
     private LinearLayout results;
-    private File vectorPath;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        vectorPath = new File(getFilesDir(), VECTOR_FILE);
         buildUi();
         updateInitialState();
     }
@@ -77,26 +79,31 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("50K Cohere 768-d vectors, FP32 baseline, turbovec quantized indexes");
+        subtitle.setText("Download 50K or 1M Cohere 768-d vectors, then benchmark every available dataset in one KPI table.");
         subtitle.setTextSize(14);
         subtitle.setTextColor(0xff53606d);
         subtitle.setPadding(0, dp(4), 0, dp(18));
         root.addView(subtitle, matchWrap());
 
-        downloadButton = new Button(this);
-        downloadButton.setText("Download 50K Cohere vectors");
-        downloadButton.setOnClickListener(v -> startDownload());
-        root.addView(downloadButton, matchWrap());
+        for (Dataset dataset : DATASETS) {
+            Button button = new Button(this);
+            button.setText("Download " + dataset.label + " (" + humanBytes(dataset.bytes) + ")");
+            button.setOnClickListener(v -> startDownload(dataset));
+            LinearLayout.LayoutParams params = matchWrap();
+            params.setMargins(0, 0, 0, dp(8));
+            root.addView(button, params);
+            downloadButtons.add(button);
+        }
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(1000);
         progress.setProgress(0);
         LinearLayout.LayoutParams progressParams = matchWrap();
-        progressParams.setMargins(0, dp(12), 0, dp(10));
+        progressParams.setMargins(0, dp(4), 0, dp(10));
         root.addView(progress, progressParams);
 
         benchmarkButton = new Button(this);
-        benchmarkButton.setText("Benchmark");
+        benchmarkButton.setText("Benchmark available datasets");
         benchmarkButton.setOnClickListener(v -> startBenchmark());
         root.addView(benchmarkButton, matchWrap());
 
@@ -115,50 +122,47 @@ public class MainActivity extends Activity {
     }
 
     private void updateInitialState() {
-        boolean ready = vectorPath.isFile() && vectorPath.length() == VECTOR_BYTES;
-        benchmarkButton.setEnabled(ready);
-        progress.setProgress(ready ? progress.getMax() : 0);
-        status.setText(ready
-                ? "Dataset ready: " + humanBytes(vectorPath.length())
-                : "Download stores only the first 50,000 vectors from the raw Cohere train file.");
+        progress.setProgress(0);
+        benchmarkButton.setEnabled(hasAnyDataset());
+        status.setText(datasetStatus());
     }
 
-    private void startDownload() {
-        downloadButton.setEnabled(false);
-        benchmarkButton.setEnabled(false);
+    private void startDownload(Dataset dataset) {
+        setBusy(true);
         results.removeAllViews();
-        status.setText("Starting download...");
+        status.setText("Starting download: " + dataset.label);
         worker.execute(() -> {
-            File tmp = new File(getFilesDir(), VECTOR_FILE + ".part");
+            File tmp = new File(getFilesDir(), dataset.fileName + ".part");
             try {
-                downloadRange(tmp);
-                if (vectorPath.exists() && !vectorPath.delete()) {
+                downloadRange(dataset, tmp);
+                File target = dataset.path(getFilesDir());
+                if (target.exists() && !target.delete()) {
                     throw new IllegalStateException("Could not replace old vector file");
                 }
-                if (!tmp.renameTo(vectorPath)) {
+                if (!tmp.renameTo(target)) {
                     throw new IllegalStateException("Could not move downloaded vector file");
                 }
                 main.post(() -> {
                     progress.setProgress(progress.getMax());
-                    status.setText("Download complete: " + humanBytes(vectorPath.length()));
-                    downloadButton.setEnabled(true);
-                    benchmarkButton.setEnabled(true);
+                    status.setText("Download complete: " + dataset.label + " (" + humanBytes(target.length()) + ")");
+                    setBusy(false);
+                    benchmarkButton.setEnabled(hasAnyDataset());
                 });
             } catch (Exception e) {
                 tmp.delete();
                 main.post(() -> {
-                    status.setText("Download failed: " + e.getMessage());
-                    downloadButton.setEnabled(true);
-                    benchmarkButton.setEnabled(vectorPath.isFile() && vectorPath.length() == VECTOR_BYTES);
+                    status.setText("Download failed for " + dataset.label + ": " + e.getMessage());
+                    setBusy(false);
+                    benchmarkButton.setEnabled(hasAnyDataset());
                 });
             }
         });
     }
 
-    private void downloadRange(File tmp) throws Exception {
+    private void downloadRange(Dataset dataset, File tmp) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(VECTOR_URL).openConnection();
         conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty("Range", "bytes=0-" + (VECTOR_BYTES - 1));
+        conn.setRequestProperty("Range", "bytes=0-" + (dataset.bytes - 1));
         conn.setConnectTimeout(30_000);
         conn.setReadTimeout(60_000);
         int code = conn.getResponseCode();
@@ -169,18 +173,18 @@ public class MainActivity extends Activity {
             byte[] buf = new byte[1024 * 1024];
             long total = 0;
             int n;
-            while ((n = in.read(buf)) != -1 && total < VECTOR_BYTES) {
-                int keep = (int) Math.min(n, VECTOR_BYTES - total);
+            while ((n = in.read(buf)) != -1 && total < dataset.bytes) {
+                int keep = (int) Math.min(n, dataset.bytes - total);
                 out.write(buf, 0, keep);
                 total += keep;
                 long done = total;
                 main.post(() -> {
-                    progress.setProgress((int) ((done * progress.getMax()) / VECTOR_BYTES));
-                    status.setText(String.format(Locale.US, "Downloading %s / %s",
-                            humanBytes(done), humanBytes(VECTOR_BYTES)));
+                    progress.setProgress((int) ((done * progress.getMax()) / dataset.bytes));
+                    status.setText(String.format(Locale.US, "Downloading %s: %s / %s",
+                            dataset.label, humanBytes(done), humanBytes(dataset.bytes)));
                 });
             }
-            if (total != VECTOR_BYTES) {
+            if (total != dataset.bytes) {
                 throw new IllegalStateException("short download: " + total + " bytes");
             }
         } finally {
@@ -189,27 +193,53 @@ public class MainActivity extends Activity {
     }
 
     private void startBenchmark() {
-        downloadButton.setEnabled(false);
-        benchmarkButton.setEnabled(false);
+        JSONArray datasets = availableDatasetsJson();
+        if (datasets.length() == 0) {
+            status.setText("Download at least one dataset first.");
+            benchmarkButton.setEnabled(false);
+            return;
+        }
+        setBusy(true);
         results.removeAllViews();
-        status.setText("Benchmark running. This performs 1000 self-query and 1000 random-query searches per index.");
+        status.setText("Benchmark running for " + datasets.length()
+                + " dataset(s). Each method uses 1000 self-query and 1000 random-query searches.");
         worker.execute(() -> {
             try {
-                String json = NativeBench.runBenchmark(vectorPath.getAbsolutePath(), getFilesDir().getAbsolutePath());
+                String json = NativeBench.runBenchmark(datasets.toString(), getFilesDir().getAbsolutePath());
                 main.post(() -> {
                     status.setText("Benchmark complete");
                     renderReport(json);
-                    downloadButton.setEnabled(true);
-                    benchmarkButton.setEnabled(true);
+                    setBusy(false);
+                    benchmarkButton.setEnabled(hasAnyDataset());
                 });
             } catch (Throwable t) {
                 main.post(() -> {
                     status.setText("Benchmark failed: " + t.getMessage());
-                    downloadButton.setEnabled(true);
-                    benchmarkButton.setEnabled(true);
+                    setBusy(false);
+                    benchmarkButton.setEnabled(hasAnyDataset());
                 });
             }
         });
+    }
+
+    private JSONArray availableDatasetsJson() {
+        JSONArray arr = new JSONArray();
+        for (Dataset dataset : DATASETS) {
+            File path = dataset.path(getFilesDir());
+            if (path.isFile() && path.length() == dataset.bytes) {
+                JSONObject obj = new JSONObject();
+                try {
+                    obj.put("id", dataset.id);
+                    obj.put("label", dataset.label);
+                    obj.put("path", path.getAbsolutePath());
+                    obj.put("vectors", dataset.vectors);
+                    arr.put(obj);
+                } catch (Exception ignored) {
+                    // JSONObject with local strings cannot fail in practice.
+                }
+            }
+        }
+        return arr;
     }
 
     private void renderReport(String json) {
@@ -218,12 +248,10 @@ public class MainActivity extends Activity {
             JSONObject report = new JSONObject(json);
             addSectionTitle("Summary");
             LinearLayout summary = panel();
-            addSummaryRow(summary, "Dataset", report.getString("dataset"));
+            addSummaryRow(summary, "Datasets benchmarked", report.getString("datasets"));
             addSummaryRow(summary, "Dimension", String.valueOf(report.getInt("dim")));
-            addSummaryRow(summary, "Base vectors", String.valueOf(report.getInt("base_vectors")));
-            addSummaryRow(summary, "Self queries", String.valueOf(report.getInt("self_queries")));
-            addSummaryRow(summary, "Random queries", String.valueOf(report.getInt("random_queries")));
-            addSummaryRow(summary, "FP32 exact time", report.getString("fp32_exact_ms") + " ms");
+            addSummaryRow(summary, "Self queries / dataset", String.valueOf(report.getInt("self_queries")));
+            addSummaryRow(summary, "Random queries / dataset", String.valueOf(report.getInt("random_queries")));
             results.addView(summary, matchWrap());
 
             addSectionTitle("KPI Table");
@@ -233,14 +261,17 @@ public class MainActivity extends Activity {
             table.setStretchAllColumns(false);
             table.setShrinkAllColumns(false);
             table.addView(tableRow(new String[]{
-                    "Index", "Bits", "Self R@1", "Self R@10", "Random R@1", "Random R@10",
-                    "Index ms", "Prep ms", "Write ms", "Self ms", "Random ms", "us/query", "ROM", "RAM delta"
+                    "Dataset", "Vectors", "Index", "Bits", "Self R@1", "Self R@10",
+                    "Random R@1", "Random R@10", "Index ms", "Prep ms", "Write ms",
+                    "Self ms", "Random ms", "us/query", "ROM", "RAM delta"
             }, true, false));
 
             JSONArray rows = report.getJSONArray("table");
             for (int i = 0; i < rows.length(); i++) {
                 JSONObject r = rows.getJSONObject(i);
                 table.addView(tableRow(new String[]{
+                        r.getString("dataset"),
+                        r.getString("vectors"),
                         r.getString("index"),
                         r.getString("bits"),
                         r.getString("self_r1"),
@@ -263,7 +294,7 @@ public class MainActivity extends Activity {
             addSectionTitle("Latency Notes");
             LinearLayout notes = panel();
             addNote(notes, "Index ms = add + quantize + in-memory index store");
-            addNote(notes, "Prep ms = blocked layout and search cache preparation");
+            addNote(notes, "Prep ms = blocked layout and search cache preparation; it is not paid per search call.");
             addNote(notes, "Write ms = persisted .tv file write");
             addNote(notes, "Self/random ms = 1000 searches each at k=10");
             JSONArray noteArray = report.getJSONArray("notes");
@@ -280,6 +311,39 @@ public class MainActivity extends Activity {
             fallback.setPadding(0, dp(8), 0, 0);
             results.addView(fallback, matchWrap());
         }
+    }
+
+    private boolean hasAnyDataset() {
+        for (Dataset dataset : DATASETS) {
+            File path = dataset.path(getFilesDir());
+            if (path.isFile() && path.length() == dataset.bytes) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String datasetStatus() {
+        StringBuilder sb = new StringBuilder("Available datasets:");
+        boolean any = false;
+        for (Dataset dataset : DATASETS) {
+            File path = dataset.path(getFilesDir());
+            if (path.isFile() && path.length() == dataset.bytes) {
+                sb.append("\n").append(dataset.label).append(" ready (").append(humanBytes(path.length())).append(")");
+                any = true;
+            }
+        }
+        if (!any) {
+            sb.append("\nNone yet. Download 50K for a quick run or 1M for the full raw Cohere slice.");
+        }
+        return sb.toString();
+    }
+
+    private void setBusy(boolean busy) {
+        for (Button button : downloadButtons) {
+            button.setEnabled(!busy);
+        }
+        benchmarkButton.setEnabled(!busy && hasAnyDataset());
     }
 
     private LinearLayout panel() {
@@ -338,7 +402,7 @@ public class MainActivity extends Activity {
         cell.setTextColor(header ? 0xffffffff : 0xff17202a);
         cell.setGravity(table ? Gravity.CENTER : Gravity.START);
         cell.setSingleLine(false);
-        cell.setMinWidth(table ? dp(112) : 0);
+        cell.setMinWidth(table ? dp(108) : 0);
         cell.setPadding(dp(8), dp(7), dp(8), dp(7));
         if (header) {
             cell.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
@@ -357,6 +421,9 @@ public class MainActivity extends Activity {
     }
 
     private static String humanBytes(long bytes) {
+        if (bytes >= 1024L * 1024L * 1024L) {
+            return String.format(Locale.US, "%.2f GB", bytes / 1073741824.0);
+        }
         if (bytes >= 1024L * 1024L) {
             return String.format(Locale.US, "%.1f MB", bytes / 1048576.0);
         }
@@ -364,5 +431,25 @@ public class MainActivity extends Activity {
             return String.format(Locale.US, "%.1f KB", bytes / 1024.0);
         }
         return bytes + " B";
+    }
+
+    private static final class Dataset {
+        final String id;
+        final String label;
+        final String fileName;
+        final int vectors;
+        final long bytes;
+
+        Dataset(String id, String label, String fileName, int vectors) {
+            this.id = id;
+            this.label = label;
+            this.fileName = fileName;
+            this.vectors = vectors;
+            this.bytes = (long) vectors * DIM * 4L;
+        }
+
+        File path(File root) {
+            return new File(root, fileName);
+        }
     }
 }
