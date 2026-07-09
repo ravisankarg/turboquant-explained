@@ -1,0 +1,16 @@
+.gradle/
+build/
+target/
+**/.gradle/
+**/build/
+**/target/
+
+android/TurboQuantBench/local.properties
+android/TurboQuantBench/app/release.keystore
+
+*.iml
+.idea/
+.claude/
+.DS_Store
+
+android/TurboQuantBench/app/src/main/jniLibs/

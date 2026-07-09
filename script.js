@@ -13,6 +13,93 @@ const polarPairDequant = [
   [-0.108, 0.061],
   [-10.191, 0.177]
 ];
+const androidBenchRows = [
+  {
+    method: "exact fp32",
+    bits: 32,
+    selfR1: "100.00%",
+    selfR10: "100.00%",
+    randomR1: "100.00%",
+    randomR10: "100.00%",
+    indexMs: 0.0,
+    prepMs: 0.0,
+    writeMs: 0.0,
+    selfMs: 4155.7,
+    randomMs: 4155.7,
+    usQuery: 4155.7,
+    rom: "146.5 MB",
+    romMb: 146.5,
+    ramDelta: "146.5 MB"
+  },
+  {
+    method: "turbovec",
+    bits: 8,
+    selfR1: "100.00%",
+    selfR10: "100.00%",
+    randomR1: "100.00%",
+    randomR10: "100.00%",
+    indexMs: 1293.7,
+    prepMs: 259.4,
+    writeMs: 17.2,
+    selfMs: 4886.6,
+    randomMs: 4890.9,
+    usQuery: 4888.8,
+    rom: "36.8 MB",
+    romMb: 36.8,
+    ramDelta: "124.4 MB"
+  },
+  {
+    method: "turbovec",
+    bits: 4,
+    selfR1: "100.00%",
+    selfR10: "100.00%",
+    randomR1: "99.20%",
+    randomR10: "100.00%",
+    indexMs: 994.9,
+    prepMs: 147.4,
+    writeMs: 8.1,
+    selfMs: 143.6,
+    randomMs: 149.8,
+    usQuery: 146.7,
+    rom: "18.5 MB",
+    romMb: 18.5,
+    ramDelta: "78.5 MB"
+  },
+  {
+    method: "turbovec",
+    bits: 3,
+    selfR1: "100.00%",
+    selfR10: "100.00%",
+    randomR1: "99.20%",
+    randomR10: "100.00%",
+    indexMs: 977.0,
+    prepMs: 74.0,
+    writeMs: 6.0,
+    selfMs: 148.0,
+    randomMs: 153.0,
+    usQuery: 150.5,
+    rom: "13.9 MB",
+    romMb: 13.9,
+    ramDelta: "34.4 MB"
+  },
+  {
+    method: "turbovec",
+    bits: 2,
+    selfR1: "99.60%",
+    selfR10: "100.00%",
+    randomR1: "89.70%",
+    randomR10: "99.80%",
+    indexMs: 927.1,
+    prepMs: 79.5,
+    writeMs: 4.3,
+    selfMs: 83.2,
+    randomMs: 80.4,
+    usQuery: 81.8,
+    rom: "9.4 MB",
+    romMb: 9.4,
+    ramDelta: "37.6 MB"
+  }
+];
 
 function renderBars(targetId, values, maxAbs = Math.max(...values.map(Math.abs))) {
   const target = document.getElementById(targetId);
@@ -237,6 +324,54 @@ function renderQuantTable() {
   }).join("");
 }
 
+function renderAndroidBench() {
+  const table = document.getElementById("androidKpiTable");
+  if (table) {
+    table.innerHTML = androidBenchRows.map(row => `
+      <tr>
+        <td class="method">${row.method}</td>
+        <td>${row.bits}</td>
+        <td>${row.selfR1}</td>
+        <td>${row.selfR10}</td>
+        <td>${row.randomR1}</td>
+        <td>${row.randomR10}</td>
+        <td>${row.indexMs.toFixed(1)}</td>
+        <td>${row.prepMs.toFixed(1)}</td>
+        <td>${row.writeMs.toFixed(1)}</td>
+        <td>${row.selfMs.toFixed(1)}</td>
+        <td>${row.randomMs.toFixed(1)}</td>
+        <td>${row.usQuery.toFixed(1)}</td>
+        <td>${row.rom}</td>
+        <td>${row.ramDelta}</td>
+      </tr>
+    `).join("");
+  }
+
+  renderBenchBars("latencyBars", androidBenchRows, "usQuery", value => `${value.toFixed(1)} us`, false);
+  renderBenchBars("sizeBars", androidBenchRows, "romMb", value => `${value.toFixed(1)} MB`, true);
+}
+
+function renderBenchBars(targetId, rows, key, formatter, sizeMode) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+
+  const max = Math.max(...rows.map(row => row[key]));
+  target.innerHTML = rows.map(row => {
+    const width = Math.max(2, row[key] / max * 100);
+    const label = row.method === "exact fp32" ? "FP32" : `${row.bits}-bit`;
+    const cls = row.method === "exact fp32" ? "fp32" : `b${row.bits}`;
+    return `
+      <div class="bench-bar ${cls}">
+        <span>${label}</span>
+        <div class="bench-bar-track">
+          <i class="bench-bar-fill" style="--w:${width}%"></i>
+        </div>
+        <strong>${formatter(row[key])}</strong>
+      </div>
+    `;
+  }).join("");
+}
+
 renderBars("heroBars", original);
 renderBars("originalBars", original);
 renderBars("beforeRotate", original);
@@ -245,3 +380,4 @@ renderPolar();
 renderCacheStack();
 renderIndexQuantDetails();
 renderQuantTable();
+renderAndroidBench();

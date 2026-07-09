@@ -818,6 +818,194 @@ code {
   color: var(--green);
 }
 
+.android-bench {
+  max-width: 1240px;
+}
+
+.bench-actions {
+  margin-bottom: 10px;
+}
+
+.bench-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 26px 0 20px;
+}
+
+.bench-stat,
+.definitions-grid article,
+.native-grid article {
+  background: rgba(255,255,255,.92);
+  border: 1px solid rgba(20,21,26,.1);
+  border-radius: 8px;
+  padding: 18px;
+}
+
+.bench-stat span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.bench-stat strong {
+  display: block;
+  margin: 9px 0;
+  font-size: clamp(24px, 3vw, 36px);
+  line-height: 1;
+}
+
+.bench-stat p,
+.native-grid p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.bench-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.bench-table {
+  width: 100%;
+  min-width: 1280px;
+  border-collapse: collapse;
+}
+
+.bench-table th,
+.bench-table td {
+  padding: 12px 11px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.bench-table th:first-child,
+.bench-table td:first-child {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  background: inherit;
+  z-index: 1;
+}
+
+.bench-table th {
+  background: #233142;
+  color: #fff;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.bench-table td {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.bench-table tbody tr:nth-child(odd) {
+  background: #fff;
+}
+
+.bench-table tbody tr:nth-child(even) {
+  background: #f3f7fb;
+}
+
+.bench-table .method {
+  font-family: var(--sans);
+  font-weight: 800;
+}
+
+.bench-viz-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.latency-bars {
+  display: grid;
+  gap: 12px;
+}
+
+.bench-bar {
+  display: grid;
+  grid-template-columns: 92px 1fr 116px;
+  gap: 10px;
+  align-items: center;
+}
+
+.bench-bar span,
+.bench-bar strong {
+  font-size: 13px;
+}
+
+.bench-bar-track {
+  height: 16px;
+  border-radius: 999px;
+  background: #edf1f6;
+  overflow: hidden;
+}
+
+.bench-bar-fill {
+  display: block;
+  height: 100%;
+  width: var(--w);
+  min-width: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--teal), var(--green));
+}
+
+.bench-bar.fp32 .bench-bar-fill,
+.bench-bar.b8 .bench-bar-fill {
+  background: linear-gradient(90deg, var(--gold), var(--red));
+}
+
+.definitions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.definitions-grid h3,
+.native-grid h3 {
+  margin: 0 0 12px;
+}
+
+.definitions-grid dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.definitions-grid dt {
+  font-weight: 800;
+}
+
+.definitions-grid dd {
+  margin: -6px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.native-stack {
+  margin-top: 34px;
+}
+
+.native-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
 .callout {
   display: flex;
   gap: 12px;
@@ -1132,7 +1320,14 @@ footer a { text-decoration: none; color: var(--ink); }
   .db-flow,
   .kv-step-grid,
   .kv-notes,
-  .result-grid {
+  .result-grid,
+  .bench-hero-grid,
+  .bench-viz-grid,
+  .definitions-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .native-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1170,6 +1365,10 @@ footer a { text-decoration: none; color: var(--ink); }
   .kv-step-grid,
   .kv-notes,
   .result-grid,
+  .bench-hero-grid,
+  .bench-viz-grid,
+  .definitions-grid,
+  .native-grid,
   .metric-row {
     grid-template-columns: 1fr;
   }

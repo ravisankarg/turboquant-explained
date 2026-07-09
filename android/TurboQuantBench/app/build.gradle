@@ -1,0 +1,67 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.turboquant.benchmark"
+    compileSdk 34
+    ndkVersion "27.2.12479018"
+
+    defaultConfig {
+        applicationId "com.turboquant.benchmark"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    signingConfigs {
+        release {
+            storeFile file("release.keystore")
+            storePassword "turboquant"
+            keyAlias "turboquant"
+            keyPassword "turboquant"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig file("release.keystore").exists() ? signingConfigs.release : signingConfigs.debug
+        }
+        debug {
+            jniDebuggable true
+        }
+    }
+}
+
+tasks.register("cargoBuildArm64", Exec) {
+    def cargoHome = System.getenv("CARGO_HOME") ?: "${System.getProperty("user.home")}/.cargo"
+    def ndkHome = android.ndkDirectory.absolutePath
+    def outDir = file("$projectDir/src/main/jniLibs/arm64-v8a")
+    inputs.files fileTree("$rootDir/native/src"), file("$rootDir/native/Cargo.toml")
+    inputs.dir file("$rootDir/../../turbovec/turbovec/src")
+    outputs.file "$outDir/libtqbench.so"
+    doFirst {
+        outDir.mkdirs()
+    }
+    environment "PATH", "${cargoHome}/bin:${System.getenv("PATH")}"
+    environment "ANDROID_NDK_HOME", ndkHome
+    environment "CC_aarch64_linux_android", "${ndkHome}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+    environment "AR_aarch64_linux_android", "${ndkHome}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+    environment "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", "${ndkHome}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+    commandLine "${cargoHome}/bin/cargo", "build", "--release", "--target", "aarch64-linux-android", "--manifest-path", "$rootDir/native/Cargo.toml"
+    doLast {
+        copy {
+            from "$rootDir/native/target/aarch64-linux-android/release/libtqbench.so"
+            into outDir
+        }
+    }
+}
+
+preBuild.dependsOn("cargoBuildArm64")

@@ -18,6 +18,7 @@
       <a href="#polarquant">PolarQuant</a>
       <a href="#qjl">QJL</a>
       <a href="#vector-db">Vector DB</a>
+      <a href="#android-bench">Android Bench</a>
       <a href="#kv-cache">KV Cache</a>
     </nav>
 
@@ -291,6 +292,138 @@
       <div class="callout">
         <strong>Key design choice:</strong>
         <span>Do not dequantize every vector in the index for every query. Use compressed search for recall, then dequantize only the candidate pool.</span>
+      </div>
+    </section>
+
+    <section class="section android-bench" id="android-bench">
+      <div class="section-copy wide">
+        <p class="eyebrow">Android benchmark app</p>
+        <h2>S25 Ultra vector-search benchmark</h2>
+        <p>
+          This repo now includes a native Android app that downloads the first 50,000 Cohere 768-dimensional vectors, builds FP32 and TurboQuant indexes on-device, and reports recall, index size, RAM, and warm query latency. The app calls Rust through JNI; Java is only used for UI, download progress, and table rendering.
+        </p>
+        <div class="hero-actions bench-actions">
+          <a class="button primary" href="releases/android/TurboQuantBench-release.apk">Download release APK</a>
+          <a class="button ghost" href="android/TurboQuantBench/">Open Android source</a>
+          <a class="button ghost" href="turbovec/turbovec/src/search.rs">Open Rust search code</a>
+        </div>
+      </div>
+
+      <div class="bench-hero-grid">
+        <article class="bench-stat">
+          <span>Best warm latency</span>
+          <strong>81.8 us/query</strong>
+          <p>2-bit TurboQuant over 50K vectors, top-10 search.</p>
+        </article>
+        <article class="bench-stat">
+          <span>Best balanced point</span>
+          <strong>4-bit: 146.7 us/query</strong>
+          <p>99.20% random R@1, 100.00% random R@10, 18.5 MB index.</p>
+        </article>
+        <article class="bench-stat">
+          <span>Exact baseline</span>
+          <strong>4.16 ms/query</strong>
+          <p>FP32 brute-force exact scan over 50,000 x 768 floats.</p>
+        </article>
+      </div>
+
+      <div class="bench-table-wrap">
+        <table class="bench-table">
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Bits</th>
+              <th>Self R@1</th>
+              <th>Self R@10</th>
+              <th>Random R@1</th>
+              <th>Random R@10</th>
+              <th>Index ms</th>
+              <th>Prep ms</th>
+              <th>Write ms</th>
+              <th>Self ms</th>
+              <th>Random ms</th>
+              <th>us/query</th>
+              <th>ROM</th>
+              <th>RAM delta</th>
+            </tr>
+          </thead>
+          <tbody id="androidKpiTable"></tbody>
+        </table>
+      </div>
+
+      <div class="bench-viz-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Warm latency per search</h3>
+            <span>lower is better</span>
+          </div>
+          <div class="latency-bars" id="latencyBars"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Index ROM size</h3>
+            <span>persisted index file</span>
+          </div>
+          <div class="latency-bars size-bars" id="sizeBars"></div>
+        </article>
+      </div>
+
+      <div class="definitions-grid">
+        <article>
+          <h3>KPI headers</h3>
+          <dl>
+            <dt>Self R@1 / Self R@10</dt>
+            <dd>Recall when the query is one of the stored base vectors. R@1 means the exact vector is ranked first; R@10 means it appears anywhere in top 10.</dd>
+            <dt>Random R@1 / Random R@10</dt>
+            <dd>Recall for deterministic normalized random mixture queries, compared against exact FP32 top-10 over the same 50K vectors.</dd>
+            <dt>Index ms</dt>
+            <dd>Time to add vectors, rotate, calibrate, quantize, and store the in-memory quantized index.</dd>
+            <dt>Prep ms</dt>
+            <dd>One-time search-cache preparation: rotation/codebook cache and SIMD-friendly blocked layout. It is not paid for every warm query.</dd>
+            <dt>us/query</dt>
+            <dd>Actual warm search latency per query after prep. This is the production latency number to watch.</dd>
+          </dl>
+        </article>
+        <article>
+          <h3>What each method does</h3>
+          <dl>
+            <dt>FP32 exact</dt>
+            <dd>Brute-force exact dot-product scan over all 50K vectors. It is used as ground truth for recall.</dd>
+            <dt>8-bit TurboQuant</dt>
+            <dd>Uses the extended Rust 8-bit codebook, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer.</dd>
+            <dt>4/3/2-bit TurboQuant</dt>
+            <dd>Use the original TurboQuant low-bit path: bit-plane packed codes, blocked layout, per-query nibble LUTs, and NEON lookup accumulation.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <div class="native-stack">
+        <div class="section-copy wide">
+          <p class="eyebrow">Why native Rust is fast</p>
+          <h2>Low latency comes from memory layout and NEON-friendly kernels</h2>
+        </div>
+        <div class="native-grid">
+          <article>
+            <span class="step">1</span>
+            <h3>Rust JNI, not Java loops</h3>
+            <p>The benchmark enters native Rust once. Dot products, quantization, top-k heaps, blocked layout, and search kernels run in optimized release Rust.</p>
+          </article>
+          <article>
+            <span class="step">2</span>
+            <h3>Blocked 32-vector layout</h3>
+            <p><code>prepare()</code> repacks compact codes into 32-vector blocks so a query scans contiguous bytes instead of chasing one vector at a time.</p>
+          </article>
+          <article>
+            <span class="step">3</span>
+            <h3>NEON nibble LUT path</h3>
+            <p>2/3/4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed.</p>
+          </article>
+          <article>
+            <span class="step">4</span>
+            <h3>Optimized exact 8-bit path</h3>
+            <p>8-bit has full byte codes, so the app precomputes exact query x centroid lookup rows with NEON and then scans contiguous block-major code bytes.</p>
+          </article>
+        </div>
       </div>
     </section>
 
