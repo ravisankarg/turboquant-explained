@@ -300,7 +300,7 @@
         <p class="eyebrow">Android benchmark app</p>
         <h2>S25 Ultra vector-search benchmark</h2>
         <p>
-          This repo now includes VectorDB 3.0, a native Android app that downloads one 100K Cohere 768-dimensional vector slice, then benchmarks separate 50K and 100K FlatIndex tables. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app compares FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit flat scans on-device, uses 30 MiB pure-vector RAM for 50K and 50 MiB for 100K, and reports recall, index size, ROM, vector RAM, and warm query latency.
+          This repo now includes VectorDB 3.0, a native Android app that downloads one 100K Cohere 768-dimensional vector slice, then benchmarks separate 50K and 100K FlatIndex tables. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app compares FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit flat scans on-device, uses a 30 MiB pure-vector search RAM cap for both tables, and reports recall, index size, ROM, data-store mode, vector staging, and one-query latency probes.
         </p>
         <p class="section-note">The table below is the latest installed v0.3 APK result: separate 50K/100K tables, bounded disk reads, standard mean top-10 overlap recall, and HNSW disabled.</p>
         <div class="hero-actions bench-actions">
@@ -308,24 +308,24 @@
           <a class="button ghost" href="android/TurboQuantBench/">Open Android source</a>
           <a class="button ghost" href="turbovec/turbovec/src/search.rs">Open Rust search code</a>
         </div>
-        <p class="section-note">Release v0.3, versionCode 4. SHA-256: <code>49e2e8b46b67442c894bbcb08322ae1cc9e5abe76c015acaaf961c1563d3ffbb</code>.</p>
+        <p class="section-note">Release v0.3, versionCode 4. SHA-256: <code>d1df34c225409e0af7a438e65f862cdbd03d552bdf618fa3aa328810336adae0</code>.</p>
       </div>
 
       <div class="bench-hero-grid">
         <article class="bench-stat">
-          <span>Best current warm latency</span>
-          <strong>0.483 ms/query</strong>
-          <p>4-bit FlatIndex over 100K vectors, top-10 search.</p>
+          <span>Best current one-query latency</span>
+          <strong>119.741 ms/query</strong>
+          <p>FP32 FlatIndex over 50K vectors, including bounded disk staging.</p>
         </article>
         <article class="bench-stat">
           <span>8-bit ARM caveat</span>
-          <strong>17.410 vs 7.165</strong>
-          <p>50K 8-bit vs FP16 ms/query; scalar byte lookups make 8-bit slower on this path.</p>
+          <strong>1144.697 vs 164.716</strong>
+          <p>50K 8-bit vs FP16 end-to-end ms/query; range preparation and scalar byte lookups dominate 8-bit.</p>
         </article>
         <article class="bench-stat">
           <span>Pure-vector RAM caps</span>
-          <strong>30 / 50 MiB</strong>
-          <p>50K / 100K steady-state vector budgets; not total Android process RSS.</p>
+          <strong>30 / 30 MiB</strong>
+          <p>50K / 100K search working-set budgets; not total Android process RSS.</p>
         </article>
       </div>
 
@@ -343,11 +343,11 @@
               <th>Index ms</th>
               <th>Prep/load ms</th>
               <th>Write ms</th>
-              <th>Self ms</th>
-              <th>Random ms</th>
               <th>ms/query</th>
               <th>ROM</th>
-              <th>Vector RAM</th>
+              <th>Data store</th>
+              <th>Vector staging</th>
+              <th>Search RAM</th>
             </tr>
           </thead>
           <tbody id="androidKpiTable"></tbody>
@@ -357,7 +357,7 @@
       <div class="bench-viz-grid">
         <article class="panel">
           <div class="panel-head">
-            <h3>Warm latency per search</h3>
+            <h3>One-query latency per search</h3>
             <span>lower is better</span>
           </div>
           <div class="latency-bars" id="latencyBars"></div>
@@ -382,15 +382,19 @@
             <dt>Index ms</dt>
             <dd>Method-specific construction time: zero for the raw FP32 reference, FP16 conversion time for the persisted FP16 file, and add/quantize/in-memory storage for TurboQuant.</dd>
             <dt>Prep/load ms</dt>
-            <dd>Persisted-index/range load plus one-time search-layout preparation. It is not paid for every warm query.</dd>
+            <dd>Total persisted range loading and search-layout preparation observed across the query-major run. For TurboQuant it is also included in end-to-end <code>ms/query</code> because ranges are not resident between requests.</dd>
             <dt>Write ms</dt>
             <dd>Time to write the persisted FP16 or TurboQuant <code>.tv</code> index file.</dd>
-            <dt>Vector RAM</dt>
-            <dd>Total accounted steady-state pure-vector budget: 30 MiB for 50K and 50 MiB for 100K. It includes query vectors and one active raw/decoded chunk or compressed range plus search layout/caches.</dd>
+            <dt>Data store</dt>
+            <dd>All four methods are disk-backed; the complete 50K/100K stores are not resident in RAM.</dd>
+            <dt>Vector staging</dt>
+            <dd>Method-specific vector payload held for the active disk chunk/range. FP32 uses raw f32, FP16 uses decoded f32, and low-bit rows use their compressed active ranges.</dd>
+            <dt>Search RAM</dt>
+            <dd>Total accounted steady-state pure-vector budget: 30 MiB for both 50K and 100K. It includes query vectors and one active raw/decoded chunk or compressed range plus search layout/caches.</dd>
             <dt>ms/query</dt>
-            <dd><code>(Self ms + Random ms) / 2000</code>, in milliseconds. This is the warm search-latency KPI.</dd>
+            <dd>Total query-major latency-probe time divided by 16 probes, in milliseconds. The probes are 8 self + 8 random; each probe scans every bounded chunk/range before the next starts, so chunks/ranges are not reused across unrelated requests. TurboQuant range load and preparation are included. Recall still uses 1000 + 1000 queries.</dd>
             <dt>Raw FP32 chunk vectors</dt>
-            <dd>Uncompressed 768-d FP32 vectors staged from disk at once: 8,218 for 50K and 15,045 for 100K. This is a chunk size, not the total dataset size.</dd>
+            <dd>Uncompressed 768-d FP32 vectors staged from disk at once: 8,218 for both 50K and 100K. This is a chunk size, not the total dataset size. FP16 uses the same decoded f32 staging size even though its disk representation is 16-bit.</dd>
           </dl>
         </article>
         <article>
@@ -405,7 +409,7 @@
             <dt>8-bit TurboQuant</dt>
             <dd>Uses rotation, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer. Its main byte-indexed centroid lookup loop is scalar because ARM lacks an efficient FP32 gather-by-byte instruction, so it can be slower than FP16 despite smaller ROM.</dd>
             <dt>4-bit TurboQuant</dt>
-            <dd>Uses bit-plane packed codes, blocked 32-vector layout, per-query nibble LUTs, and ARM NEON lookup accumulation.</dd>
+            <dd>Uses bit-plane packed codes, blocked 32-vector layout, per-query nibble LUTs, and ARM NEON lookup accumulation. The kernel is efficient, but this one-query KPI also includes loading and preparing every bounded range.</dd>
           </dl>
         </article>
       </div>
@@ -415,7 +419,7 @@
           <h3>Current benchmark conditions</h3>
           <span>VectorDB 3.0</span>
         </div>
-        <p>The current APK accounts for total steady-state pure-vector RAM: 30 MiB for 50K and 50 MiB for 100K. FP32 and FP16 scan bounded raw/decoded chunks; TurboQuant reads bounded <code>.tv</code> ranges, searches each range, merges top-10 results, and releases the range before loading the next one. The raw FP32 staging chunks are 8,218 vectors for 50K and 15,045 for 100K, about 24.1 MiB and 44.1 MiB of raw data respectively; query and working buffers use the rest of the cap. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build/preparation peaks are outside this KPI. HNSW is disabled.</p>
+        <p>The current APK accounts for a 30 MiB steady-state search working-set budget for both 50K and 100K. All methods, including FP32, are disk-backed: FP32 and FP16 scan bounded raw/decoded chunks; TurboQuant reads bounded <code>.tv</code> ranges, searches each range, merges top-10 results, and releases the range before loading the next one. The raw FP32 staging window is 8,218 vectors, about 24.1 MiB of raw f32 data; query and working buffers use the rest of the cap. The displayed <code>ms/query</code> averages 16 query-major latency probes (8 self + 8 random); each probe scans every bounded chunk/range before the next starts, and TurboQuant range load/preparation is included. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build/preparation peaks are outside this KPI. HNSW is disabled.</p>
       </div>
 
       <div class="native-stack">
@@ -437,12 +441,12 @@
           <article>
             <span class="step">3</span>
             <h3>NEON nibble LUT path</h3>
-            <p>4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed.</p>
+            <p>4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed. The LUT kernel is fast; disk range staging can still dominate end-to-end latency.</p>
           </article>
           <article>
             <span class="step">4</span>
             <h3>Why 8-bit can be slower</h3>
-            <p>On arm64, the 8-bit scorer scans contiguous block-major bytes but performs scalar centroid lookups for each dimension. FP16 uses a simpler dense dot-product scan; 4-bit has a dedicated NEON nibble-LUT kernel.</p>
+            <p>On arm64, the 8-bit scorer scans contiguous block-major bytes but performs scalar centroid lookups for each dimension. FP16 uses a simpler dense dot-product scan; 4-bit has a dedicated NEON nibble-LUT kernel, but its query-major result still includes per-range staging and preparation.</p>
           </article>
         </div>
       </div>

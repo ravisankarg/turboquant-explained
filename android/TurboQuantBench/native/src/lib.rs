@@ -18,10 +18,11 @@ const K: usize = 10;
 const SELF_QUERIES: usize = 1_000;
 const RANDOM_QUERIES: usize = 1_000;
 const VECTOR_RAM_50K_BYTES: usize = 30 * 1024 * 1024;
-const VECTOR_RAM_100K_BYTES: usize = 50 * 1024 * 1024;
+const VECTOR_RAM_100K_BYTES: usize = 30 * 1024 * 1024;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const QUERY_BATCH: usize = 64;
 const SIMD_BLOCK: usize = 32;
+const TIMED_PROBES_PER_SET: usize = 8;
 
 #[derive(Deserialize)]
 struct DatasetInput {
@@ -51,6 +52,8 @@ struct Row {
     random_search_ms: String,
     ms_per_query: String,
     index_rom: String,
+    data_store: String,
+    vector_staging: String,
     vector_ram: String,
 }
 
@@ -72,6 +75,8 @@ struct Report {
     random_queries: usize,
     vector_ram_caps: String,
     raw_chunk_vectors: String,
+    raw_chunk_ram: String,
+    raw_fp32_storage: String,
     methods: String,
     notes: Vec<String>,
     tables: Vec<DatasetTable>,
@@ -120,7 +125,7 @@ fn run(datasets_json: &str, output_dir: &Path) -> Result<String, String> {
         tables.push(DatasetTable {
             dataset: dataset.label,
             vectors: human_count(dataset.vectors),
-            vector_ram_cap: format!("{} cap", human_bytes(cap as u64)),
+            vector_ram_cap: format!("{} search cap", human_bytes(cap as u64)),
             raw_chunk_vectors: raw_chunk_vectors(cap).to_string(),
             quant_chunk_vectors: format!(
                 "8-bit {}, 4-bit {}",
@@ -137,7 +142,7 @@ fn run(datasets_json: &str, output_dir: &Path) -> Result<String, String> {
         self_queries: SELF_QUERIES,
         random_queries: RANDOM_QUERIES,
         vector_ram_caps: format!(
-            "50K: {} cap; 100K: {} cap",
+            "50K: {} search cap; 100K: {} search cap",
             human_bytes(VECTOR_RAM_50K_BYTES as u64),
             human_bytes(VECTOR_RAM_100K_BYTES as u64)
         ),
@@ -146,13 +151,31 @@ fn run(datasets_json: &str, output_dir: &Path) -> Result<String, String> {
             raw_chunk_vectors(VECTOR_RAM_50K_BYTES),
             raw_chunk_vectors(VECTOR_RAM_100K_BYTES)
         ),
+        raw_chunk_ram: format!(
+            "50K: {}; 100K: {}",
+            human_bytes((raw_chunk_vectors(VECTOR_RAM_50K_BYTES) * DIM * 4) as u64),
+            human_bytes((raw_chunk_vectors(VECTOR_RAM_100K_BYTES) * DIM * 4) as u64)
+        ),
+        raw_fp32_storage: "50K: disk-backed; 100K: disk-backed".to_string(),
         methods: "FlatIndex FP32, FP16, 8-bit, and 4-bit".to_string(),
         notes: vec![
             "Recall is measured against exact FP32 top-10 over the same dataset size.".to_string(),
             "Random R@1 is intentionally omitted; R@10 is the mean fraction of exact FP32 top-10 neighbors recovered by the approximate top-10.".to_string(),
             "Random queries are deterministic normalized blends of two base vectors; self queries are the first 1000 base vectors.".to_string(),
-            "Steady-state pure vector RAM is capped at 30 MiB for 50K and 50 MiB for 100K; app/UI memory, Rust/runtime/dependency code, allocator overhead, and OS file cache are excluded.".to_string(),
-            "FP32/FP16 keep the query vectors plus one bounded raw/decoded chunk; TurboQuant keeps one persisted compressed range plus its blocked SIMD copy and search caches.".to_string(),
+            "Search working-set RAM is capped at 30 MiB for both 50K and 100K; app/UI memory, Rust/runtime/dependency code, allocator overhead, and OS file cache are excluded.".to_string(),
+            "All methods are disk-backed: FP32 and FP16 load bounded raw/decoded chunks, while TurboQuant loads one persisted compressed range plus its blocked SIMD copy and search caches.".to_string(),
+            format!(
+                "ms/query uses query-major latency probes ({} self + {} random): one probe scans every bounded chunk or compressed range before the next probe starts, so chunks/ranges are not reused across unrelated requests. Recall still uses all {} self + {} random queries. TurboQuant range load and preparation are included in probe latency.",
+                TIMED_PROBES_PER_SET,
+                TIMED_PROBES_PER_SET,
+                SELF_QUERIES,
+                RANDOM_QUERIES
+            ),
+            format!(
+                "Raw FP32 staging is {} for 50K and {} for 100K; the full raw stores remain on disk.",
+                human_bytes((raw_chunk_vectors(VECTOR_RAM_50K_BYTES) * DIM * 4) as u64),
+                human_bytes((raw_chunk_vectors(VECTOR_RAM_100K_BYTES) * DIM * 4) as u64)
+            ),
             "All four methods are flat scans over every vector; HNSW is disabled for this run.".to_string(),
             "FlatIndex FP32 scans the raw f32 database, FlatIndex FP16 scans a persisted IEEE FP16 copy, and FlatIndex 8-bit/4-bit use TurboQuant compressed flat scans.".to_string(),
             "On arm64-v8a, TurboQuant's 8-bit path uses the block-major byte-code scorer; 4-bit uses the NEON lookup-table path.".to_string(),
@@ -161,7 +184,7 @@ fn run(datasets_json: &str, output_dir: &Path) -> Result<String, String> {
                 quant_chunk_vectors(VECTOR_RAM_100K_BYTES, 8),
                 quant_chunk_vectors(VECTOR_RAM_100K_BYTES, 4)
             ),
-            "Prep/load ms includes loading and preparing the bounded TurboQuant ranges; the RAM cap is a steady-state search budget, so temporary full-index build/preparation peaks are not part of this KPI.".to_string(),
+            "Prep/load ms includes loading and preparing the bounded TurboQuant ranges; the search RAM cap is a steady-state working-set budget, so temporary full-index build/preparation peaks are not part of this KPI.".to_string(),
         ],
         tables,
     };
@@ -176,6 +199,9 @@ fn bench_dataset(dataset: &DatasetInput, output_dir: &Path) -> Result<Vec<Row>, 
     let vector_path = Path::new(&dataset.path);
     validate_vector_file(vector_path, dataset.vectors)?;
 
+    // Every method is disk-backed. The search cap covers the current raw or
+    // decoded chunk plus query and search scratch; the full dataset is never
+    // loaded into RAM at once.
     let self_queries = load_vector_range(
         vector_path,
         0,
@@ -190,10 +216,15 @@ fn bench_dataset(dataset: &DatasetInput, output_dir: &Path) -> Result<Vec<Row>, 
         vector_ram_cap,
     )?;
 
-    let fp32_start = Instant::now();
-    let self_truth = exact_topk_file(vector_path, dataset.vectors, &self_queries, vector_ram_cap)?;
-    let random_truth = exact_topk_file(vector_path, dataset.vectors, &random_queries, vector_ram_cap)?;
-    let fp32_ms = fp32_start.elapsed().as_secs_f64() * 1000.0;
+    let self_truth = exact_topk_file_batched(vector_path, dataset.vectors, &self_queries, vector_ram_cap)?;
+    let random_truth = exact_topk_file_batched(vector_path, dataset.vectors, &random_queries, vector_ram_cap)?;
+    let fp32_ms = time_fp32_probes(
+        vector_path,
+        dataset.vectors,
+        &self_queries,
+        &random_queries,
+        vector_ram_cap,
+    )?;
 
     let mut rows = Vec::new();
     rows.push(fp32_row(
@@ -387,6 +418,7 @@ fn read_f32_values(
             if read < need {
                 carry[carry_len..carry_len + read].copy_from_slice(&buf[..read]);
                 carry_len += read;
+                remaining -= read;
                 continue;
             }
             carry[carry_len..4].copy_from_slice(&buf[..need]);
@@ -586,7 +618,41 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
-fn exact_topk_file(
+fn exact_topk_file_query_major(
+    path: &Path,
+    n: usize,
+    queries: &[f32],
+    cap: usize,
+) -> Result<Vec<[usize; K]>, String> {
+    let nq = queries.len() / DIM;
+    let mut results = Vec::with_capacity(nq);
+    for qi in 0..nq {
+        let q = &queries[qi * DIM..(qi + 1) * DIM];
+        let mut heap = [Hit {
+            score: f32::NEG_INFINITY,
+            idx: usize::MAX,
+        }; K];
+        // Query-major ordering models an online request: this query scans
+        // every bounded chunk before the next query starts. It deliberately
+        // does not reuse a loaded chunk across unrelated queries.
+        for_each_vector_chunk(path, n, cap, |base, chunk| {
+            for (local_idx, v) in chunk.chunks_exact(DIM).enumerate() {
+                insert_hit(
+                    &mut heap,
+                    Hit {
+                        score: dot(q, v),
+                        idx: base + local_idx,
+                    },
+                );
+            }
+            Ok(())
+        })?;
+        results.push(finalize_heap(heap));
+    }
+    Ok(results)
+}
+
+fn exact_topk_file_batched(
     path: &Path,
     n: usize,
     queries: &[f32],
@@ -604,11 +670,10 @@ fn exact_topk_file(
         heaps.par_iter_mut().enumerate().for_each(|(qi, heap)| {
             let q = &queries[qi * DIM..(qi + 1) * DIM];
             for (local_idx, v) in chunk.chunks_exact(DIM).enumerate() {
-                let score = dot(q, v);
                 insert_hit(
                     heap,
                     Hit {
-                        score,
+                        score: dot(q, v),
                         idx: base + local_idx,
                     },
                 );
@@ -616,17 +681,27 @@ fn exact_topk_file(
         });
         Ok(())
     })?;
-    Ok(heaps
-        .into_iter()
-        .map(|mut heap| {
-            heap.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-            let mut ids = [0usize; K];
-            for i in 0..K {
-                ids[i] = heap[i].idx;
-            }
-            ids
-        })
-        .collect())
+    Ok(heaps.into_iter().map(finalize_heap).collect())
+}
+
+fn time_fp32_probes(
+    path: &Path,
+    n: usize,
+    self_queries: &[f32],
+    random_queries: &[f32],
+    cap: usize,
+) -> Result<f64, String> {
+    let mut total_ms = 0.0f64;
+    for queries in [self_queries, random_queries] {
+        let count = (queries.len() / DIM).min(TIMED_PROBES_PER_SET);
+        for qi in 0..count {
+            let q = &queries[qi * DIM..(qi + 1) * DIM];
+            let start = Instant::now();
+            exact_topk_file_query_major(path, n, q, cap)?;
+            total_ms += start.elapsed().as_secs_f64() * 1000.0;
+        }
+    }
+    Ok(total_ms)
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -689,19 +764,23 @@ fn bench_fp16(
     write_ms += flush_start.elapsed().as_secs_f64() * 1000.0;
     let rom = path.metadata().map(|m| m.len()).unwrap_or(0);
 
-    let self_start = Instant::now();
-    let self_results = flat_fp16_topk_file(&path, dataset.vectors, self_queries, vector_ram_cap)?;
-    let self_ms = self_start.elapsed().as_secs_f64() * 1000.0;
-
-    let random_start = Instant::now();
-    let random_results = flat_fp16_topk_file(&path, dataset.vectors, random_queries, vector_ram_cap)?;
-    let random_ms = random_start.elapsed().as_secs_f64() * 1000.0;
+    let self_results =
+        flat_fp16_topk_file_batched(&path, dataset.vectors, self_queries, vector_ram_cap)?;
+    let random_results =
+        flat_fp16_topk_file_batched(&path, dataset.vectors, random_queries, vector_ram_cap)?;
+    let probe_ms = time_fp16_probes(
+        &path,
+        dataset.vectors,
+        self_queries,
+        random_queries,
+        vector_ram_cap,
+    )?;
 
     let self_r1 = recall_at_1_arrays(&self_results, self_truth);
     let self_r10 = recall_at_10_arrays(&self_results, self_truth);
     let random_r10 = recall_at_10_arrays(&random_results, random_truth);
-    let total_q = (SELF_QUERIES + RANDOM_QUERIES) as f64;
-    let ms_per_query = (self_ms + random_ms) / total_q;
+    let timed_q = (2 * TIMED_PROBES_PER_SET) as f64;
+    let ms_per_query = probe_ms / timed_q;
 
     Ok(Row {
         index: "FlatIndex".to_string(),
@@ -712,15 +791,58 @@ fn bench_fp16(
         index_ms: format!("{:.1}", index_ms),
         prepare_ms: "0.0".to_string(),
         write_ms: format!("{:.1}", write_ms),
-        self_search_ms: format!("{:.1}", self_ms),
-        random_search_ms: format!("{:.1}", random_ms),
+        self_search_ms: format!("{:.1}", probe_ms / 2.0),
+        random_search_ms: format!("{:.1}", probe_ms / 2.0),
         ms_per_query: format!("{:.3}", ms_per_query),
         index_rom: human_bytes(rom),
+        data_store: "disk-backed".to_string(),
+        vector_staging: vector_staging_label(vector_ram_cap, 16),
         vector_ram: vector_ram_label(vector_ram_cap),
     })
 }
 
-fn flat_fp16_topk_file(
+fn flat_fp16_topk_file_query_major(
+    path: &Path,
+    n: usize,
+    queries: &[f32],
+    vector_ram_cap: usize,
+) -> Result<Vec<[usize; K]>, String> {
+    let nq = queries.len() / DIM;
+    let per_chunk = raw_chunk_vectors(vector_ram_cap);
+    let mut results = Vec::with_capacity(nq);
+    for qi in 0..nq {
+        let q = &queries[qi * DIM..(qi + 1) * DIM];
+        let mut heap = [Hit {
+            score: f32::NEG_INFINITY,
+            idx: usize::MAX,
+        }; K];
+        let mut base = 0usize;
+        while base < n {
+            let take = (n - base).min(per_chunk);
+            let chunk = load_fp16_range(
+                path,
+                base,
+                take,
+                vector_ram_cap,
+                query_vector_bytes(),
+            )?;
+            for (local_idx, v) in chunk.chunks_exact(DIM).enumerate() {
+                insert_hit(
+                    &mut heap,
+                    Hit {
+                        score: dot(q, v),
+                        idx: base + local_idx,
+                    },
+                );
+            }
+            base += take;
+        }
+        results.push(finalize_heap(heap));
+    }
+    Ok(results)
+}
+
+fn flat_fp16_topk_file_batched(
     path: &Path,
     n: usize,
     queries: &[f32],
@@ -759,17 +881,27 @@ fn flat_fp16_topk_file(
         });
         base += take;
     }
-    Ok(heaps
-        .into_iter()
-        .map(|mut heap| {
-            heap.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-            let mut ids = [0usize; K];
-            for i in 0..K {
-                ids[i] = heap[i].idx;
-            }
-            ids
-        })
-        .collect())
+    Ok(heaps.into_iter().map(finalize_heap).collect())
+}
+
+fn time_fp16_probes(
+    path: &Path,
+    n: usize,
+    self_queries: &[f32],
+    random_queries: &[f32],
+    cap: usize,
+) -> Result<f64, String> {
+    let mut total_ms = 0.0f64;
+    for queries in [self_queries, random_queries] {
+        let count = (queries.len() / DIM).min(TIMED_PROBES_PER_SET);
+        for qi in 0..count {
+            let q = &queries[qi * DIM..(qi + 1) * DIM];
+            let start = Instant::now();
+            flat_fp16_topk_file_query_major(path, n, q, cap)?;
+            total_ms += start.elapsed().as_secs_f64() * 1000.0;
+        }
+    }
+    Ok(total_ms)
 }
 
 fn bench_quant(
@@ -800,8 +932,8 @@ fn bench_quant(
     let rom = path.metadata().map(|m| m.len()).unwrap_or(0);
 
     drop(index);
-    let (self_results, random_results, prepare_ms, self_ms, random_ms) =
-        quant_topk_two_ranges(
+    let (self_results, random_results, _batch_prepare_ms) =
+        quant_topk_two_ranges_batched(
             &path,
             dataset.vectors,
             bit_width,
@@ -809,12 +941,20 @@ fn bench_quant(
             random_queries,
             vector_ram_cap,
         )?;
+    let (probe_ms, probe_prepare_ms) = time_quant_probes(
+        &path,
+        dataset.vectors,
+        bit_width,
+        self_queries,
+        random_queries,
+        vector_ram_cap,
+    )?;
 
     let self_r1 = recall_at_1_arrays(&self_results, self_truth);
     let self_r10 = recall_at_10_arrays(&self_results, self_truth);
     let random_r10 = recall_at_10_arrays(&random_results, random_truth);
-    let total_q = (SELF_QUERIES + RANDOM_QUERIES) as f64;
-    let ms_per_query = (self_ms + random_ms) / total_q;
+    let timed_q = (2 * TIMED_PROBES_PER_SET) as f64;
+    let ms_per_query = probe_ms / timed_q;
 
     Ok(Row {
         index: "FlatIndex".to_string(),
@@ -823,24 +963,26 @@ fn bench_quant(
         self_r10: pct(self_r10),
         random_r10: pct(random_r10),
         index_ms: format!("{:.1}", index_ms),
-        prepare_ms: format!("{:.1}", prepare_ms),
+        prepare_ms: format!("{:.1}", probe_prepare_ms),
         write_ms: format!("{:.1}", write_ms),
-        self_search_ms: format!("{:.1}", self_ms),
-        random_search_ms: format!("{:.1}", random_ms),
+        self_search_ms: format!("{:.1}", probe_ms / 2.0),
+        random_search_ms: format!("{:.1}", probe_ms / 2.0),
         ms_per_query: format!("{:.3}", ms_per_query),
         index_rom: human_bytes(rom),
+        data_store: "disk-backed".to_string(),
+        vector_staging: vector_staging_label(vector_ram_cap, bit_width),
         vector_ram: vector_ram_label(vector_ram_cap),
     })
 }
 
-fn quant_topk_two_ranges(
+fn quant_topk_two_ranges_batched(
     path: &Path,
     n: usize,
     bit_width: usize,
     self_queries: &[f32],
     random_queries: &[f32],
     vector_ram_cap: usize,
-) -> Result<(Vec<[usize; K]>, Vec<[usize; K]>, f64, f64, f64), String> {
+) -> Result<(Vec<[usize; K]>, Vec<[usize; K]>, f64), String> {
     let self_nq = self_queries.len() / DIM;
     let random_nq = random_queries.len() / DIM;
     let mut self_heaps = vec![
@@ -857,12 +999,9 @@ fn quant_topk_two_ranges(
         }; K];
         random_nq
     ];
-
     let per_chunk = quant_chunk_vectors(vector_ram_cap, bit_width);
     let mut base = 0usize;
     let mut prepare_ms = 0.0f64;
-    let mut self_ms = 0.0f64;
-    let mut random_ms = 0.0f64;
     while base < n {
         let take = (n - base).min(per_chunk);
         let prepare_start = Instant::now();
@@ -870,25 +1009,39 @@ fn quant_topk_two_ranges(
             .map_err(|e| format!("load range {} [{}..{}]: {e}", path.display(), base, base + take))?;
         index.prepare();
         prepare_ms += prepare_start.elapsed().as_secs_f64() * 1000.0;
-
-        let self_start = Instant::now();
         search_quant_query_batches(&index, self_queries, base, &mut self_heaps);
-        self_ms += self_start.elapsed().as_secs_f64() * 1000.0;
-
-        let random_start = Instant::now();
         search_quant_query_batches(&index, random_queries, base, &mut random_heaps);
-        random_ms += random_start.elapsed().as_secs_f64() * 1000.0;
-
         base += take;
     }
 
     Ok((
-        finalize_topk_heaps(self_heaps),
-        finalize_topk_heaps(random_heaps),
+        self_heaps.into_iter().map(finalize_heap).collect(),
+        random_heaps.into_iter().map(finalize_heap).collect(),
         prepare_ms,
-        self_ms,
-        random_ms,
     ))
+}
+
+fn time_quant_probes(
+    path: &Path,
+    n: usize,
+    bit_width: usize,
+    self_queries: &[f32],
+    random_queries: &[f32],
+    vector_ram_cap: usize,
+) -> Result<(f64, f64), String> {
+    let mut total_ms = 0.0f64;
+    let mut prepare_ms = 0.0f64;
+    for queries in [self_queries, random_queries] {
+        let count = (queries.len() / DIM).min(TIMED_PROBES_PER_SET);
+        for qi in 0..count {
+            let q = &queries[qi * DIM..(qi + 1) * DIM];
+            let (_ids, query_ms, staged_ms) =
+                quant_topk_one_query(path, n, bit_width, q, vector_ram_cap)?;
+            total_ms += query_ms;
+            prepare_ms += staged_ms;
+        }
+    }
+    Ok((total_ms, prepare_ms))
 }
 
 fn search_quant_query_batches(
@@ -923,18 +1076,60 @@ fn search_quant_query_batches(
     }
 }
 
-fn finalize_topk_heaps(heaps: Vec<[Hit; K]>) -> Vec<[usize; K]> {
-    heaps
-        .into_iter()
-        .map(|mut heap| {
-            heap.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-            let mut ids = [0usize; K];
-            for i in 0..K {
-                ids[i] = heap[i].idx;
+fn quant_topk_one_query(
+    path: &Path,
+    n: usize,
+    bit_width: usize,
+    query: &[f32],
+    vector_ram_cap: usize,
+) -> Result<([usize; K], f64, f64), String> {
+    let per_chunk = quant_chunk_vectors(vector_ram_cap, bit_width);
+    let mut heap = [Hit {
+        score: f32::NEG_INFINITY,
+        idx: usize::MAX,
+    }; K];
+    let mut base = 0usize;
+    let mut total_ms = 0.0f64;
+    let mut staged_ms = 0.0f64;
+
+    while base < n {
+        let take = (n - base).min(per_chunk);
+        let stage_start = Instant::now();
+        let index = TurboQuantIndex::load_range(path, base, take)
+            .map_err(|e| format!("load range {} [{}..{}]: {e}", path.display(), base, base + take))?;
+        index.prepare();
+        let stage_elapsed = stage_start.elapsed().as_secs_f64() * 1000.0;
+        staged_ms += stage_elapsed;
+
+        let search_start = Instant::now();
+        let results = index.search(query, K);
+        for rank in 0..results.k.min(K) {
+            let local_idx = results.indices[rank];
+            let score = results.scores[rank];
+            if local_idx >= 0 && score.is_finite() {
+                insert_hit(
+                    &mut heap,
+                    Hit {
+                        score,
+                        idx: base + local_idx as usize,
+                    },
+                );
             }
-            ids
-        })
-        .collect()
+        }
+        total_ms += stage_elapsed + search_start.elapsed().as_secs_f64() * 1000.0;
+        base += take;
+    }
+
+    Ok((finalize_heap(heap), total_ms, staged_ms))
+}
+
+fn finalize_heap(mut heap: [Hit; K]) -> [usize; K] {
+    heap.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    let mut ids = [0usize; K];
+    for i in 0..K {
+        ids[i] = heap[i].idx;
+    }
+    ids
 }
 
 fn for_each_vector_chunk<F>(path: &Path, n: usize, cap: usize, mut f: F) -> Result<(), String>
@@ -955,7 +1150,7 @@ where
 }
 
 fn fp32_row(fp32_ms: f64, raw_bytes: u64, vector_ram_cap: usize) -> Row {
-    let per_query = fp32_ms / ((SELF_QUERIES + RANDOM_QUERIES) as f64);
+    let per_query = fp32_ms / (2 * TIMED_PROBES_PER_SET) as f64;
     Row {
         index: "FlatIndex".to_string(),
         bits: "32".to_string(),
@@ -969,6 +1164,8 @@ fn fp32_row(fp32_ms: f64, raw_bytes: u64, vector_ram_cap: usize) -> Row {
         random_search_ms: format!("{:.1}", fp32_ms / 2.0),
         ms_per_query: format!("{:.3}", per_query),
         index_rom: human_bytes(raw_bytes),
+        data_store: "disk-backed".to_string(),
+        vector_staging: vector_staging_label(vector_ram_cap, 32),
         vector_ram: vector_ram_label(vector_ram_cap),
     }
 }
@@ -1026,7 +1223,27 @@ fn index_path(output_dir: &Path, dataset_id: &str, bit_width: usize) -> PathBuf 
 }
 
 fn vector_ram_label(cap: usize) -> String {
-    format!("{} cap", human_bytes(cap as u64))
+    format!("{} search cap", human_bytes(cap as u64))
+}
+
+fn vector_staging_label(cap: usize, bit_width: usize) -> String {
+    if bit_width == 32 {
+        format!(
+            "{} raw f32",
+            human_bytes((raw_chunk_vectors(cap) * DIM * std::mem::size_of::<f32>()) as u64)
+        )
+    } else if bit_width == 16 {
+        format!(
+            "{} decoded f32",
+            human_bytes((raw_chunk_vectors(cap) * DIM * std::mem::size_of::<f32>()) as u64)
+        )
+    } else {
+        format!(
+            "{} {}-bit range",
+            human_bytes(quant_resident_bytes(quant_chunk_vectors(cap, bit_width), bit_width) as u64),
+            bit_width
+        )
+    }
 }
 
 fn pct(v: f64) -> String {
