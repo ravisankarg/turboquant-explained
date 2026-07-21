@@ -26,9 +26,11 @@ import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int DIM = 768;
-    private static final Dataset[] DATASETS = new Dataset[]{
-            new Dataset("cohere-50k", "Cohere 50K vectors", "cohere_50k_768.f32", 50_000),
-            new Dataset("cohere-1m", "Cohere 1M vectors", "cohere_1m_768.f32", 1_000_000)
+    private static final Dataset DOWNLOAD_DATASET =
+            new Dataset("cohere-100k", "Cohere 100K vectors", "cohere_100k_768.f32", 100_000);
+    private static final BenchmarkSlice[] BENCHMARK_SLICES = new BenchmarkSlice[]{
+            new BenchmarkSlice("cohere-50k", "Cohere 50K vectors", 50_000),
+            new BenchmarkSlice("cohere-100k", "Cohere 100K vectors", 100_000)
     };
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -37,6 +39,7 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
     private TextView status;
     private LinearLayout results;
+    private String renderedBenchmarkJson;
     private final Runnable downloadPoller = new Runnable() {
         @Override
         public void run() {
@@ -93,7 +96,7 @@ public class MainActivity extends Activity {
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
-        title.setText("TurboQuant Benchmark");
+        title.setText("VectorDB 3.0");
         title.setTextSize(24);
         title.setTextColor(0xff17202a);
         title.setGravity(Gravity.START);
@@ -101,21 +104,19 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Download 50K or 1M Cohere 768-d vectors, then benchmark every available dataset in one KPI table.");
+        subtitle.setText("Download one 100K Cohere 768-d vector slice, then benchmark separate 50K and 100K FlatIndex tables.");
         subtitle.setTextSize(14);
         subtitle.setTextColor(0xff53606d);
         subtitle.setPadding(0, dp(4), 0, dp(18));
         root.addView(subtitle, matchWrap());
 
-        for (Dataset dataset : DATASETS) {
-            Button button = new Button(this);
-            button.setText("Download " + dataset.label + " (" + humanBytes(dataset.bytes) + ")");
-            button.setOnClickListener(v -> startDownload(dataset));
-            LinearLayout.LayoutParams params = matchWrap();
-            params.setMargins(0, 0, 0, dp(8));
-            root.addView(button, params);
-            downloadButtons.add(button);
-        }
+        Button button = new Button(this);
+        button.setText("Download " + DOWNLOAD_DATASET.label + " (" + humanBytes(DOWNLOAD_DATASET.bytes) + ")");
+        button.setOnClickListener(v -> startDownload(DOWNLOAD_DATASET));
+        LinearLayout.LayoutParams params = matchWrap();
+        params.setMargins(0, 0, 0, dp(8));
+        root.addView(button, params);
+        downloadButtons.add(button);
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(1000);
@@ -157,6 +158,7 @@ public class MainActivity extends Activity {
         }
         setDownloadRunningUi(true);
         results.removeAllViews();
+        renderedBenchmarkJson = null;
         File tmp = new File(getFilesDir(), dataset.fileName + ".part");
         long resume = tmp.isFile() ? tmp.length() : 0L;
         status.setText(resume > 0L
@@ -185,6 +187,7 @@ public class MainActivity extends Activity {
         }
         setBusy(true);
         results.removeAllViews();
+        renderedBenchmarkJson = null;
         status.setText("Benchmark starting in foreground service for " + datasets.length()
                 + " dataset(s). It continues in background and with the screen off.");
         Intent intent = new Intent(this, BenchmarkService.class)
@@ -201,15 +204,15 @@ public class MainActivity extends Activity {
 
     private JSONArray availableDatasetsJson() {
         JSONArray arr = new JSONArray();
-        for (Dataset dataset : DATASETS) {
-            File path = dataset.path(getFilesDir());
-            if (path.isFile() && path.length() == dataset.bytes) {
+        File path = DOWNLOAD_DATASET.path(getFilesDir());
+        if (path.isFile() && path.length() == DOWNLOAD_DATASET.bytes) {
+            for (BenchmarkSlice slice : BENCHMARK_SLICES) {
                 JSONObject obj = new JSONObject();
                 try {
-                    obj.put("id", dataset.id);
-                    obj.put("label", dataset.label);
+                    obj.put("id", slice.id);
+                    obj.put("label", slice.label);
                     obj.put("path", path.getAbsolutePath());
-                    obj.put("vectors", dataset.vectors);
+                    obj.put("vectors", slice.vectors);
                     arr.put(obj);
                 } catch (Exception ignored) {
                     // JSONObject with local strings cannot fail in practice.
@@ -229,51 +232,66 @@ public class MainActivity extends Activity {
             addSummaryRow(summary, "Dimension", String.valueOf(report.getInt("dim")));
             addSummaryRow(summary, "Self queries / dataset", String.valueOf(report.getInt("self_queries")));
             addSummaryRow(summary, "Random queries / dataset", String.valueOf(report.getInt("random_queries")));
+            addSummaryRow(summary, "Steady-state vector RAM caps", report.getString("vector_ram_caps"));
+            addSummaryRow(summary, "Raw FP32 chunk vectors", report.getString("raw_chunk_vectors"));
+            addSummaryRow(summary, "Methods", report.getString("methods"));
             results.addView(summary, matchWrap());
 
-            addSectionTitle("KPI Table");
-            HorizontalScrollView hscroll = new HorizontalScrollView(this);
-            hscroll.setHorizontalScrollBarEnabled(true);
-            TableLayout table = new TableLayout(this);
-            table.setStretchAllColumns(false);
-            table.setShrinkAllColumns(false);
-            table.addView(tableRow(new String[]{
-                    "Dataset", "Vectors", "Index", "Bits", "Self R@1", "Self R@10",
-                    "Random R@1", "Random R@10", "Index ms", "Prep ms", "Write ms",
-                    "Self ms", "Random ms", "us/query", "ROM", "RAM delta"
-            }, true, false));
-
-            JSONArray rows = report.getJSONArray("table");
-            for (int i = 0; i < rows.length(); i++) {
-                JSONObject r = rows.getJSONObject(i);
+            addSectionTitle("KPI Tables");
+            JSONArray tables = report.getJSONArray("tables");
+            for (int tableIndex = 0; tableIndex < tables.length(); tableIndex++) {
+                JSONObject datasetTable = tables.getJSONObject(tableIndex);
+                String vectorRamCap = datasetTable.optString("vector_ram_cap", "vector RAM cap unavailable");
+                addSectionTitle(datasetTable.getString("dataset") + " - "
+                        + datasetTable.getString("vectors") + " (" + vectorRamCap + ")");
+                HorizontalScrollView hscroll = new HorizontalScrollView(this);
+                hscroll.setHorizontalScrollBarEnabled(true);
+                TableLayout table = new TableLayout(this);
+                table.setStretchAllColumns(false);
+                table.setShrinkAllColumns(false);
                 table.addView(tableRow(new String[]{
-                        r.getString("dataset"),
-                        r.getString("vectors"),
-                        r.getString("index"),
-                        r.getString("bits"),
-                        r.getString("self_r1"),
-                        r.getString("self_r10"),
-                        r.getString("random_r1"),
-                        r.getString("random_r10"),
-                        r.getString("index_ms"),
-                        r.getString("prepare_ms"),
-                        r.getString("write_ms"),
-                        r.getString("self_search_ms"),
-                        r.getString("random_search_ms"),
-                        r.getString("us_per_query"),
-                        r.getString("index_rom"),
-                        r.getString("ram_delta")
-                }, false, i % 2 == 1));
-            }
-            hscroll.addView(table);
-            results.addView(hscroll, matchWrap());
+                        "Method", "Bits", "Self R@1", "Self R@10", "Random R@10",
+                        "Index ms", "Prep/load ms", "Write ms", "Self ms", "Random ms",
+                        "ms/query", "ROM", "Vector RAM"
+                }, true, false));
 
-            addSectionTitle("Latency Notes");
+                JSONArray rows = datasetTable.getJSONArray("rows");
+                for (int i = 0; i < rows.length(); i++) {
+                    JSONObject r = rows.getJSONObject(i);
+                    table.addView(tableRow(new String[]{
+                            r.getString("index"),
+                            r.getString("bits"),
+                            r.getString("self_r1"),
+                            r.getString("self_r10"),
+                            r.getString("random_r10"),
+                            r.getString("index_ms"),
+                            r.getString("prepare_ms"),
+                            r.getString("write_ms"),
+                            r.getString("self_search_ms"),
+                            r.getString("random_search_ms"),
+                            r.getString("ms_per_query"),
+                            r.getString("index_rom"),
+                            r.optString("vector_ram", vectorRamCap)
+                    }, false, i % 2 == 1));
+                }
+                hscroll.addView(table);
+                hscroll.setFocusable(false);
+                hscroll.setFocusableInTouchMode(false);
+                hscroll.scrollTo(0, 0);
+                results.addView(hscroll, matchWrap());
+            }
+
+            addSectionTitle("Benchmark legend");
             LinearLayout notes = panel();
             addNote(notes, "Index ms = add + quantize + in-memory index store");
-            addNote(notes, "Prep ms = blocked layout and search cache preparation; it is not paid per search call.");
-            addNote(notes, "Write ms = persisted .tv file write");
+            addNote(notes, "Prep/load ms = persisted-index load plus cache preparation; FP16 reads its disk cache in bounded chunks during search.");
+            addNote(notes, "Write ms = persisted index file write; FP16 writes IEEE FP16 and TurboQuant writes .tv.");
             addNote(notes, "Self/random ms = 1000 searches each at k=10");
+            addNote(notes, "Random R@1 is omitted. R@10 is the mean fraction of exact FP32 top-10 neighbors recovered by the approximate top-10.");
+            addNote(notes, "All rows are FlatIndex scans: FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit; HNSW is disabled.");
+            addNote(notes, "Vector RAM is the total accounted steady-state vector budget: query vectors plus one raw/decoded chunk or one compressed TurboQuant range, blocked SIMD copy, and search caches.");
+            addNote(notes, "The cap excludes app/UI memory, Rust/runtime/dependency code, allocator overhead, and OS file cache. It is 30 MiB for 50K and 50 MiB for 100K.");
+            addNote(notes, "TurboQuant reads bounded .tv ranges, searches each range, merges top-10 results, and releases the range before loading the next one.");
             JSONArray noteArray = report.getJSONArray("notes");
             for (int i = 0; i < noteArray.length(); i++) {
                 addNote(notes, noteArray.getString(i));
@@ -291,13 +309,8 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasAnyDataset() {
-        for (Dataset dataset : DATASETS) {
-            File path = dataset.path(getFilesDir());
-            if (path.isFile() && path.length() == dataset.bytes) {
-                return true;
-            }
-        }
-        return false;
+        File path = DOWNLOAD_DATASET.path(getFilesDir());
+        return path.isFile() && path.length() == DOWNLOAD_DATASET.bytes;
     }
 
     private void refreshDownloadState() {
@@ -347,9 +360,10 @@ public class MainActivity extends Activity {
             benchmarkButton.setEnabled(hasAnyDataset());
             if (snap.error != null) {
                 status.setText("Benchmark failed: " + snap.error);
-            } else if (snap.resultJson != null) {
+            } else if (snap.resultJson != null && !snap.resultJson.equals(renderedBenchmarkJson)) {
                 status.setText("Benchmark complete");
                 renderReport(snap.resultJson);
+                renderedBenchmarkJson = snap.resultJson;
             }
         }
     }
@@ -357,15 +371,14 @@ public class MainActivity extends Activity {
     private String datasetStatus() {
         StringBuilder sb = new StringBuilder("Available datasets:");
         boolean any = false;
-        for (Dataset dataset : DATASETS) {
-            File path = dataset.path(getFilesDir());
-            if (path.isFile() && path.length() == dataset.bytes) {
-                sb.append("\n").append(dataset.label).append(" ready (").append(humanBytes(path.length())).append(")");
-                any = true;
-            }
+        File path = DOWNLOAD_DATASET.path(getFilesDir());
+        if (path.isFile() && path.length() == DOWNLOAD_DATASET.bytes) {
+            sb.append("\n").append(DOWNLOAD_DATASET.label).append(" ready (").append(humanBytes(path.length())).append(")");
+            sb.append("\nBenchmark tables: Cohere 50K and Cohere 100K, each with FlatIndex FP32/FP16/8-bit/4-bit.");
+            any = true;
         }
         if (!any) {
-            sb.append("\nNone yet. Download 50K for a quick run or 1M for the full raw Cohere slice.");
+            sb.append("\nNone yet. Download the 100K raw Cohere slice; benchmark will produce separate 50K and 100K FlatIndex tables.");
         }
         return sb.toString();
     }
@@ -488,6 +501,18 @@ public class MainActivity extends Activity {
 
         File path(File root) {
             return new File(root, fileName);
+        }
+    }
+
+    private static final class BenchmarkSlice {
+        final String id;
+        final String label;
+        final int vectors;
+
+        BenchmarkSlice(String id, String label, int vectors) {
+            this.id = id;
+            this.label = label;
+            this.vectors = vectors;
         }
     }
 }

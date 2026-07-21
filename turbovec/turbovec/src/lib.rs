@@ -570,6 +570,31 @@ impl TurboQuantIndex {
         ))
     }
 
+    /// Load one positional range from a persisted `.tv` index.
+    ///
+    /// Only the selected vectors' packed codes and per-vector scales are
+    /// read. The returned index uses local slot ids in `0..count`; callers
+    /// scanning multiple ranges should add the range offset to result ids.
+    /// This is useful for bounded-memory search over an index larger than the
+    /// resident vector budget.
+    pub fn load_range(
+        path: impl AsRef<Path>,
+        start_vector: usize,
+        count: usize,
+    ) -> std::io::Result<Self> {
+        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale) =
+            io::load_range(path, start_vector, count)?;
+        Ok(Self::from_parts(
+            Some(dim),
+            bit_width,
+            n_vectors,
+            packed_codes,
+            scales,
+            tqplus_shift,
+            tqplus_scale,
+        ))
+    }
+
     pub(crate) fn from_parts(
         dim: Option<usize>,
         bit_width: usize,

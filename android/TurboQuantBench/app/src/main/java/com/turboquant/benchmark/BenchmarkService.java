@@ -75,17 +75,23 @@ public class BenchmarkService extends Service {
     static Snapshot snapshot(Context context) {
         synchronized (LOCK) {
             String result = state.resultJson;
-            if (result == null && state.done) {
+            boolean done = state.done;
+            if (result == null && !state.running) {
                 File report = new File(context.getFilesDir(), REPORT_FILE);
                 if (report.isFile()) {
                     try {
                         result = new String(java.nio.file.Files.readAllBytes(report.toPath()), StandardCharsets.UTF_8);
+                        done = result != null;
                     } catch (Exception ignored) {
                         result = null;
                     }
                 }
             }
-            return new Snapshot(state.running, state.done, state.status, result, state.error);
+            String status = state.status;
+            if (done && status == null) {
+                status = "Benchmark complete";
+            }
+            return new Snapshot(state.running, done, status, result, state.error);
         }
     }
 

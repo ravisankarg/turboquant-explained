@@ -23,7 +23,7 @@
 //! file" cleanly.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const TV_MAGIC: &[u8; 4] = b"TVPI";
@@ -37,7 +37,7 @@ const REBUILD_HINT: &str =
      of the per-vector scalar from ||v|| to a length-renormalization correction).";
 
 /// Core payload — what a fully-deserialized index needs.
-type CoreLoad = (usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>);
+pub(crate) type CoreLoad = (usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>);
 
 /// `.tv` write — positional index.
 pub fn write(
@@ -93,6 +93,116 @@ pub fn load(path: impl AsRef<Path>) -> io::Result<CoreLoad> {
     let mut version = [0u8; 1];
     f.read_exact(&mut version)?;
     read_core_versioned(&mut f, version[0], TV_VERSION, ".tv")
+}
+
+/// Load one positional range from a `.tv` file without materialising the
+/// complete compressed index. The returned index has local slots numbered
+/// from zero; callers that scan multiple ranges must add the range offset to
+/// returned ids.
+pub(crate) fn load_range(
+    path: impl AsRef<Path>,
+    start_vector: usize,
+    count: usize,
+) -> io::Result<CoreLoad> {
+    let mut f = BufReader::new(File::open(path)?);
+
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)?;
+    if &magic != TV_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a turbovec .tv file: wrong magic",
+        ));
+    }
+    let mut version = [0u8; 1];
+    f.read_exact(&mut version)?;
+    if !matches!(version[0], 2 | 3) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported .tv format version: {} (this build supports versions 2 and {})",
+                version[0], TV_VERSION
+            ),
+        ));
+    }
+
+    let (bit_width, dim, n_vectors) = read_validated_header(&mut f)?;
+    if dim == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cannot load a range from an uncommitted lazy index",
+        ));
+    }
+    if start_vector > n_vectors || count > n_vectors - start_vector {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "range [{start_vector}, {}) is outside index with {n_vectors} vectors",
+                start_vector.saturating_add(count)
+            ),
+        ));
+    }
+
+    let header_end = f.stream_position()?;
+    let bytes_per_vector = (dim / 8)
+        .checked_mul(bit_width)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packed code size overflows usize"))?;
+    let total_code_bytes = bytes_per_vector
+        .checked_mul(n_vectors)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packed code size overflows usize"))?;
+    let range_code_bytes = bytes_per_vector
+        .checked_mul(count)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "range code size overflows usize"))?;
+
+    let code_offset = header_end
+        .checked_add(
+            bytes_per_vector
+                .checked_mul(start_vector)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "range offset overflows file size"))?
+                as u64,
+        )
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "range offset overflows file size"))?;
+    f.seek(SeekFrom::Start(code_offset))?;
+    let packed_codes = read_exact_vec(&mut f, range_code_bytes)?;
+
+    let scales_offset = header_end
+        .checked_add(total_code_bytes as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "scale offset overflows file size"))?;
+    let range_scales_offset = scales_offset
+        .checked_add(
+            start_vector
+                .checked_mul(4)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "scale offset overflows file size"))?
+                as u64,
+        )
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "scale offset overflows file size"))?;
+    f.seek(SeekFrom::Start(range_scales_offset))?;
+    let scales = read_f32_array(&mut f, count)?;
+
+    let calibration_offset = scales_offset
+        .checked_add(
+            n_vectors
+                .checked_mul(4)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "calibration offset overflows file size"))?
+                as u64,
+        )
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "calibration offset overflows file size"))?;
+    let (tqplus_shift, tqplus_scale) = if version[0] == 3 {
+        f.seek(SeekFrom::Start(calibration_offset))?;
+        read_tqplus_trailer(&mut f, dim)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    Ok((
+        bit_width,
+        dim,
+        count,
+        packed_codes,
+        scales,
+        tqplus_shift,
+        tqplus_scale,
+    ))
 }
 
 /// `.tvim` write — positional index plus the id-map side-tables.
@@ -249,6 +359,12 @@ fn read_core_v2<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
 fn read_core_v3<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
     let (bit_width, dim, n_vectors, packed_codes, scales) = read_header_codes_scales(r)?;
 
+    let (tqplus_shift, tqplus_scale) = read_tqplus_trailer(r, dim)?;
+
+    Ok((bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale))
+}
+
+fn read_tqplus_trailer<R: Read>(r: &mut R, dim: usize) -> io::Result<(Vec<f32>, Vec<f32>)> {
     let mut n_calib_bytes = [0u8; 4];
     r.read_exact(&mut n_calib_bytes)?;
     let n_calib = u32::from_le_bytes(n_calib_bytes) as usize;
@@ -260,13 +376,28 @@ fn read_core_v3<R: Read>(r: &mut R) -> io::Result<CoreLoad> {
     }
     let tqplus_shift = read_f32_array(r, n_calib)?;
     let tqplus_scale = read_f32_array(r, n_calib)?;
-
-    Ok((bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale))
+    Ok((tqplus_shift, tqplus_scale))
 }
 
 fn read_header_codes_scales<R: Read>(
     r: &mut R,
 ) -> io::Result<(usize, usize, usize, Vec<u8>, Vec<f32>)> {
+    let (bit_width, dim, n_vectors) = read_validated_header(r)?;
+
+    // The validated sizes below are safe to use for allocation.
+    let packed_bytes = (dim / 8)
+        .checked_mul(bit_width)
+        .and_then(|x| x.checked_mul(n_vectors))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "packed code size overflows usize")
+        })?;
+    let packed_codes = read_exact_vec(r, packed_bytes)?;
+
+    let scales = read_f32_array(r, n_vectors)?;
+    Ok((bit_width, dim, n_vectors, packed_codes, scales))
+}
+
+fn read_validated_header<R: Read>(r: &mut R) -> io::Result<(usize, usize, usize)> {
     let mut header = [0u8; CORE_HEADER_SIZE];
     r.read_exact(&mut header)?;
     let bit_width = header[0] as usize;
@@ -308,19 +439,7 @@ fn read_header_codes_scales<R: Read>(
         ));
     }
 
-    // Checked arithmetic: `dim`/`n_vectors` are attacker-controlled u32s, so
-    // the product can overflow `usize` (on 32-bit targets this wrap would
-    // yield an undersized buffer and later out-of-bounds reads).
-    let packed_bytes = (dim / 8)
-        .checked_mul(bit_width)
-        .and_then(|x| x.checked_mul(n_vectors))
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "packed code size overflows usize")
-        })?;
-    let packed_codes = read_exact_vec(r, packed_bytes)?;
-
-    let scales = read_f32_array(r, n_vectors)?;
-    Ok((bit_width, dim, n_vectors, packed_codes, scales))
+    Ok((bit_width, dim, n_vectors))
 }
 
 /// Read exactly `n` bytes without pre-allocating `n` up front. A malicious
