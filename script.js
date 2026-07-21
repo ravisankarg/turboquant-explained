@@ -15,99 +15,52 @@ const polarPairDequant = [
 ];
 const androidBenchRows = [
   {
-    dataset: "Cohere 50K",
-    vectors: "50K",
-    method: "exact fp32",
-    bits: 32,
-    selfR1: "100.00%",
-    selfR10: "100.00%",
-    randomR1: "100.00%",
-    randomR10: "100.00%",
-    indexMs: 0.0,
-    prepMs: 0.0,
-    writeMs: 0.0,
-    selfMs: 4155.7,
-    randomMs: 4155.7,
-    usQuery: 4155.7,
-    rom: "146.5 MB",
-    romMb: 146.5,
-    ramDelta: "146.5 MB"
+    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 32,
+    selfR1: "100.00%", selfR10: "100.00%", randomR10: "100.00%",
+    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0, selfMs: 4750.4, randomMs: 4750.4,
+    msQuery: 4.750, rom: "146.5 MB", romMb: 146.5, vectorRam: "30.0 MiB cap"
   },
   {
-    dataset: "Cohere 50K",
-    vectors: "50K",
-    method: "turbovec",
-    bits: 8,
-    selfR1: "100.00%",
-    selfR10: "100.00%",
-    randomR1: "100.00%",
-    randomR10: "100.00%",
-    indexMs: 1293.7,
-    prepMs: 259.4,
-    writeMs: 17.2,
-    selfMs: 4886.6,
-    randomMs: 4890.9,
-    usQuery: 4888.8,
-    rom: "36.8 MB",
-    romMb: 36.8,
-    ramDelta: "124.4 MB"
+    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 16,
+    selfR1: "100.00%", selfR10: "99.89%", randomR10: "99.65%",
+    indexMs: 94.2, prepMs: 0.0, writeMs: 24.2, selfMs: 6152.2, randomMs: 8177.2,
+    msQuery: 7.165, rom: "73.2 MB", romMb: 73.2, vectorRam: "30.0 MiB cap"
   },
   {
-    dataset: "Cohere 50K",
-    vectors: "50K",
-    method: "turbovec",
-    bits: 4,
-    selfR1: "100.00%",
-    selfR10: "100.00%",
-    randomR1: "99.20%",
-    randomR10: "100.00%",
-    indexMs: 994.9,
-    prepMs: 147.4,
-    writeMs: 8.1,
-    selfMs: 143.6,
-    randomMs: 149.8,
-    usQuery: 146.7,
-    rom: "18.5 MB",
-    romMb: 18.5,
-    ramDelta: "78.5 MB"
+    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 8,
+    selfR1: "100.00%", selfR10: "98.97%", randomR10: "98.61%",
+    indexMs: 2756.1, prepMs: 2935.1, writeMs: 22.1, selfMs: 17139.7, randomMs: 17679.8,
+    msQuery: 17.410, rom: "36.8 MB", romMb: 36.8, vectorRam: "30.0 MiB cap"
   },
   {
-    dataset: "Cohere 50K",
-    vectors: "50K",
-    method: "turbovec",
-    bits: 3,
-    selfR1: "100.00%",
-    selfR10: "100.00%",
-    randomR1: "99.20%",
-    randomR10: "100.00%",
-    indexMs: 977.0,
-    prepMs: 74.0,
-    writeMs: 6.0,
-    selfMs: 148.0,
-    randomMs: 153.0,
-    usQuery: 150.5,
-    rom: "13.9 MB",
-    romMb: 13.9,
-    ramDelta: "34.4 MB"
+    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 4,
+    selfR1: "100.00%", selfR10: "91.51%", randomR10: "88.21%",
+    indexMs: 3193.2, prepMs: 1489.4, writeMs: 14.1, selfMs: 878.0, randomMs: 855.2,
+    msQuery: 0.867, rom: "18.5 MB", romMb: 18.5, vectorRam: "30.0 MiB cap"
   },
   {
-    dataset: "Cohere 50K",
-    vectors: "50K",
-    method: "turbovec",
-    bits: 2,
-    selfR1: "99.60%",
-    selfR10: "100.00%",
-    randomR1: "89.70%",
-    randomR10: "99.80%",
-    indexMs: 927.1,
-    prepMs: 79.5,
-    writeMs: 4.3,
-    selfMs: 83.2,
-    randomMs: 80.4,
-    usQuery: 81.8,
-    rom: "9.4 MB",
-    romMb: 9.4,
-    ramDelta: "37.6 MB"
+    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 32,
+    selfR1: "100.00%", selfR10: "100.00%", randomR10: "100.00%",
+    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0, selfMs: 40749.4, randomMs: 40749.4,
+    msQuery: 40.749, rom: "293.0 MB", romMb: 293.0, vectorRam: "50.0 MiB cap"
+  },
+  {
+    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 16,
+    selfR1: "100.00%", selfR10: "99.74%", randomR10: "99.73%",
+    indexMs: 328.1, prepMs: 0.0, writeMs: 81.8, selfMs: 22634.9, randomMs: 10169.0,
+    msQuery: 16.402, rom: "146.5 MB", romMb: 146.5, vectorRam: "50.0 MiB cap"
+  },
+  {
+    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 8,
+    selfR1: "100.00%", selfR10: "99.19%", randomR10: "98.65%",
+    indexMs: 4424.8, prepMs: 2450.6, writeMs: 58.8, selfMs: 21897.5, randomMs: 18842.3,
+    msQuery: 20.370, rom: "73.6 MB", romMb: 73.6, vectorRam: "50.0 MiB cap"
+  },
+  {
+    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 4,
+    selfR1: "100.00%", selfR10: "92.06%", randomR10: "88.02%",
+    indexMs: 2422.4, prepMs: 781.7, writeMs: 17.7, selfMs: 496.9, randomMs: 469.6,
+    msQuery: 0.483, rom: "37.0 MB", romMb: 37.0, vectorRam: "50.0 MiB cap"
   }
 ];
 
@@ -345,21 +298,20 @@ function renderAndroidBench() {
         <td>${row.bits}</td>
         <td>${row.selfR1}</td>
         <td>${row.selfR10}</td>
-        <td>${row.randomR1}</td>
         <td>${row.randomR10}</td>
         <td>${row.indexMs.toFixed(1)}</td>
         <td>${row.prepMs.toFixed(1)}</td>
         <td>${row.writeMs.toFixed(1)}</td>
         <td>${row.selfMs.toFixed(1)}</td>
         <td>${row.randomMs.toFixed(1)}</td>
-        <td>${row.usQuery.toFixed(1)}</td>
+        <td>${row.msQuery.toFixed(3)}</td>
         <td>${row.rom}</td>
-        <td>${row.ramDelta}</td>
+        <td>${row.vectorRam}</td>
       </tr>
     `).join("");
   }
 
-  renderBenchBars("latencyBars", androidBenchRows, "usQuery", value => `${value.toFixed(1)} us`, false);
+  renderBenchBars("latencyBars", androidBenchRows, "msQuery", value => `${value.toFixed(3)} ms`, false);
   renderBenchBars("sizeBars", androidBenchRows, "romMb", value => `${value.toFixed(1)} MB`, true);
 }
 
@@ -370,8 +322,8 @@ function renderBenchBars(targetId, rows, key, formatter, sizeMode) {
   const max = Math.max(...rows.map(row => row[key]));
   target.innerHTML = rows.map(row => {
     const width = Math.max(2, row[key] / max * 100);
-    const label = row.method === "exact fp32" ? "FP32" : `${row.bits}-bit`;
-    const cls = row.method === "exact fp32" ? "fp32" : `b${row.bits}`;
+    const label = row.bits === 32 ? "FP32" : `${row.bits}-bit`;
+    const cls = row.bits === 32 ? "fp32" : `b${row.bits}`;
     return `
       <div class="bench-bar ${cls}">
         <span>${label}</span>

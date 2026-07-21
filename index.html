@@ -300,30 +300,32 @@
         <p class="eyebrow">Android benchmark app</p>
         <h2>S25 Ultra vector-search benchmark</h2>
         <p>
-          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app builds FP32 exact, bundled HNSW, and TurboQuant indexes on-device, caps raw database staging at 100 MB, and reports recall, index size, RAM, and warm query latency.
+          This repo now includes VectorDB 3.0, a native Android app that downloads one 100K Cohere 768-dimensional vector slice, then benchmarks separate 50K and 100K FlatIndex tables. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app compares FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit flat scans on-device, uses 30 MiB pure-vector RAM for 50K and 50 MiB for 100K, and reports recall, index size, ROM, vector RAM, and warm query latency.
         </p>
+        <p class="section-note">The table below is the latest installed v0.3 APK result: separate 50K/100K tables, bounded disk reads, standard mean top-10 overlap recall, and HNSW disabled.</p>
         <div class="hero-actions bench-actions">
-          <a class="button primary" href="releases/android/TurboQuantBench-release.apk">Download release APK</a>
+          <a class="button primary" href="releases/android/vecdb-release-v0.3.apk">Download vecdb-release-v0.3 APK</a>
           <a class="button ghost" href="android/TurboQuantBench/">Open Android source</a>
           <a class="button ghost" href="turbovec/turbovec/src/search.rs">Open Rust search code</a>
         </div>
+        <p class="section-note">Release v0.3, versionCode 4. SHA-256: <code>49e2e8b46b67442c894bbcb08322ae1cc9e5abe76c015acaaf961c1563d3ffbb</code>.</p>
       </div>
 
       <div class="bench-hero-grid">
         <article class="bench-stat">
-          <span>Best warm latency</span>
-          <strong>81.8 us/query</strong>
-          <p>2-bit TurboQuant over 50K vectors, top-10 search.</p>
+          <span>Best current warm latency</span>
+          <strong>0.483 ms/query</strong>
+          <p>4-bit FlatIndex over 100K vectors, top-10 search.</p>
         </article>
         <article class="bench-stat">
-          <span>Best balanced point</span>
-          <strong>4-bit: 146.7 us/query</strong>
-          <p>99.20% random R@1, 100.00% random R@10, 18.5 MB index.</p>
+          <span>8-bit ARM caveat</span>
+          <strong>17.410 vs 7.165</strong>
+          <p>50K 8-bit vs FP16 ms/query; scalar byte lookups make 8-bit slower on this path.</p>
         </article>
         <article class="bench-stat">
-          <span>Exact baseline</span>
-          <strong>4.16 ms/query</strong>
-          <p>FP32 brute-force exact scan over 50,000 x 768 floats.</p>
+          <span>Pure-vector RAM caps</span>
+          <strong>30 / 50 MiB</strong>
+          <p>50K / 100K steady-state vector budgets; not total Android process RSS.</p>
         </article>
       </div>
 
@@ -337,16 +339,15 @@
               <th>Bits</th>
               <th>Self R@1</th>
               <th>Self R@10</th>
-              <th>Random R@1</th>
               <th>Random R@10</th>
               <th>Index ms</th>
-              <th>Prep ms</th>
+              <th>Prep/load ms</th>
               <th>Write ms</th>
               <th>Self ms</th>
               <th>Random ms</th>
-              <th>us/query</th>
+              <th>ms/query</th>
               <th>ROM</th>
-              <th>RAM delta</th>
+              <th>Vector RAM</th>
             </tr>
           </thead>
           <tbody id="androidKpiTable"></tbody>
@@ -375,15 +376,21 @@
           <h3>KPI headers</h3>
           <dl>
             <dt>Self R@1 / Self R@10</dt>
-            <dd>Recall when the query is one of the stored base vectors. R@1 means the exact vector is ranked first; R@10 means it appears anywhere in top 10.</dd>
-            <dt>Random R@1 / Random R@10</dt>
-            <dd>Recall for deterministic normalized random mixture queries, compared against exact FP32 top-10 over the same dataset size.</dd>
+            <dd>Self-query recall against exact FP32 top-10. R@1 means the original vector is ranked first. R@10 is mean top-10 overlap; a 9/10 overlap is 90%, not 100%.</dd>
+            <dt>Random R@10</dt>
+            <dd>Mean fraction of the 10 exact FP32 top-10 neighbors recovered by the approximate top-10 for deterministic normalized random mixture queries. Random R@1 is intentionally omitted.</dd>
             <dt>Index ms</dt>
-            <dd>Time to add vectors, rotate, calibrate, quantize, and store the in-memory quantized index.</dd>
-            <dt>Prep ms</dt>
-            <dd>One-time search-cache preparation: rotation/codebook cache and SIMD-friendly blocked layout. It is not paid for every warm query.</dd>
-            <dt>us/query</dt>
-            <dd>Actual warm search latency per query after prep. This is the production latency number to watch.</dd>
+            <dd>Method-specific construction time: zero for the raw FP32 reference, FP16 conversion time for the persisted FP16 file, and add/quantize/in-memory storage for TurboQuant.</dd>
+            <dt>Prep/load ms</dt>
+            <dd>Persisted-index/range load plus one-time search-layout preparation. It is not paid for every warm query.</dd>
+            <dt>Write ms</dt>
+            <dd>Time to write the persisted FP16 or TurboQuant <code>.tv</code> index file.</dd>
+            <dt>Vector RAM</dt>
+            <dd>Total accounted steady-state pure-vector budget: 30 MiB for 50K and 50 MiB for 100K. It includes query vectors and one active raw/decoded chunk or compressed range plus search layout/caches.</dd>
+            <dt>ms/query</dt>
+            <dd><code>(Self ms + Random ms) / 2000</code>, in milliseconds. This is the warm search-latency KPI.</dd>
+            <dt>Raw FP32 chunk vectors</dt>
+            <dd>Uncompressed 768-d FP32 vectors staged from disk at once: 8,218 for 50K and 15,045 for 100K. This is a chunk size, not the total dataset size.</dd>
           </dl>
         </article>
         <article>
@@ -391,14 +398,24 @@
           <dl>
             <dt>FP32 exact</dt>
             <dd>Brute-force exact dot-product scan over all vectors in the selected dataset. It is used as ground truth for recall.</dd>
-            <dt>HNSW</dt>
-            <dd>Uses the Rust hnsw_rs graph implementation bundled into the APK native library; no phone-side package install is required.</dd>
+            <dt>FlatIndex methods</dt>
+            <dd>All four current rows scan every vector: raw FP32, persisted IEEE FP16, TurboQuant 8-bit, and TurboQuant 4-bit. HNSW is disabled so the comparison isolates flat-search speed under the fixed vector budget.</dd>
+            <dt>FP16 disk scan</dt>
+            <dd>Persists IEEE FP16, decodes one bounded chunk into FP32 staging memory, scans it, then releases it before the next chunk.</dd>
             <dt>8-bit TurboQuant</dt>
-            <dd>Uses the extended Rust 8-bit codebook, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer.</dd>
-            <dt>4/3/2-bit TurboQuant</dt>
-            <dd>Use the original TurboQuant low-bit path: bit-plane packed codes, blocked layout, per-query nibble LUTs, and NEON lookup accumulation.</dd>
+            <dd>Uses rotation, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer. Its main byte-indexed centroid lookup loop is scalar because ARM lacks an efficient FP32 gather-by-byte instruction, so it can be slower than FP16 despite smaller ROM.</dd>
+            <dt>4-bit TurboQuant</dt>
+            <dd>Uses bit-plane packed codes, blocked 32-vector layout, per-query nibble LUTs, and ARM NEON lookup accumulation.</dd>
           </dl>
         </article>
+      </div>
+
+      <div class="panel benchmark-legend-note">
+        <div class="panel-head">
+          <h3>Current benchmark conditions</h3>
+          <span>VectorDB 3.0</span>
+        </div>
+        <p>The current APK accounts for total steady-state pure-vector RAM: 30 MiB for 50K and 50 MiB for 100K. FP32 and FP16 scan bounded raw/decoded chunks; TurboQuant reads bounded <code>.tv</code> ranges, searches each range, merges top-10 results, and releases the range before loading the next one. The raw FP32 staging chunks are 8,218 vectors for 50K and 15,045 for 100K, about 24.1 MiB and 44.1 MiB of raw data respectively; query and working buffers use the rest of the cap. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build/preparation peaks are outside this KPI. HNSW is disabled.</p>
       </div>
 
       <div class="native-stack">
@@ -410,7 +427,7 @@
           <article>
             <span class="step">1</span>
             <h3>Rust JNI, not Java loops</h3>
-            <p>A foreground service enters native Rust once. Dot products, HNSW graph search, quantization, top-k heaps, blocked layout, and search kernels run in optimized release Rust.</p>
+            <p>A foreground service enters native Rust once. Dot products, flat top-k scans, quantization, heaps, blocked layout, and search kernels run in optimized release Rust.</p>
           </article>
           <article>
             <span class="step">2</span>
@@ -420,12 +437,12 @@
           <article>
             <span class="step">3</span>
             <h3>NEON nibble LUT path</h3>
-            <p>2/3/4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed.</p>
+            <p>4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed.</p>
           </article>
           <article>
             <span class="step">4</span>
-            <h3>Optimized exact 8-bit path</h3>
-            <p>8-bit has full byte codes, so the app precomputes exact query x centroid lookup rows with NEON and then scans contiguous block-major code bytes.</p>
+            <h3>Why 8-bit can be slower</h3>
+            <p>On arm64, the 8-bit scorer scans contiguous block-major bytes but performs scalar centroid lookups for each dimension. FP16 uses a simpler dense dot-product scan; 4-bit has a dedicated NEON nibble-LUT kernel.</p>
           </article>
         </div>
       </div>
