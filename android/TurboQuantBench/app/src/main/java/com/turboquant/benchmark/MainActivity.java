@@ -234,6 +234,8 @@ public class MainActivity extends Activity {
             addSummaryRow(summary, "Random queries / dataset", String.valueOf(report.getInt("random_queries")));
             addSummaryRow(summary, "Steady-state vector RAM caps", report.getString("vector_ram_caps"));
             addSummaryRow(summary, "Raw FP32 chunk vectors", report.getString("raw_chunk_vectors"));
+            addSummaryRow(summary, "Raw FP32 staging RAM", report.getString("raw_chunk_ram"));
+            addSummaryRow(summary, "FP32 raw storage", report.getString("raw_fp32_storage"));
             addSummaryRow(summary, "Methods", report.getString("methods"));
             results.addView(summary, matchWrap());
 
@@ -251,8 +253,8 @@ public class MainActivity extends Activity {
                 table.setShrinkAllColumns(false);
                 table.addView(tableRow(new String[]{
                         "Method", "Bits", "Self R@1", "Self R@10", "Random R@10",
-                        "Index ms", "Prep/load ms", "Write ms", "Self ms", "Random ms",
-                        "ms/query", "ROM", "Vector RAM"
+                        "Index ms", "Prep/load ms", "Write ms",
+                        "ms/query", "ROM", "Data store", "Vector staging", "Search RAM"
                 }, true, false));
 
                 JSONArray rows = datasetTable.getJSONArray("rows");
@@ -267,10 +269,10 @@ public class MainActivity extends Activity {
                             r.getString("index_ms"),
                             r.getString("prepare_ms"),
                             r.getString("write_ms"),
-                            r.getString("self_search_ms"),
-                            r.getString("random_search_ms"),
                             r.getString("ms_per_query"),
                             r.getString("index_rom"),
+                            r.optString("data_store", "disk-backed"),
+                            r.optString("vector_staging", "not reported"),
                             r.optString("vector_ram", vectorRamCap)
                     }, false, i % 2 == 1));
                 }
@@ -286,11 +288,13 @@ public class MainActivity extends Activity {
             addNote(notes, "Index ms = add + quantize + in-memory index store");
             addNote(notes, "Prep/load ms = persisted-index load plus cache preparation; FP16 reads its disk cache in bounded chunks during search.");
             addNote(notes, "Write ms = persisted index file write; FP16 writes IEEE FP16 and TurboQuant writes .tv.");
-            addNote(notes, "Self/random ms = 1000 searches each at k=10");
+            addNote(notes, "Query workload: 1000 self queries and 1000 random queries per dataset at k=10.");
             addNote(notes, "Random R@1 is omitted. R@10 is the mean fraction of exact FP32 top-10 neighbors recovered by the approximate top-10.");
             addNote(notes, "All rows are FlatIndex scans: FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit; HNSW is disabled.");
-            addNote(notes, "Vector RAM is the total accounted steady-state vector budget: query vectors plus one raw/decoded chunk or one compressed TurboQuant range, blocked SIMD copy, and search caches.");
-            addNote(notes, "The cap excludes app/UI memory, Rust/runtime/dependency code, allocator overhead, and OS file cache. It is 30 MiB for 50K and 50 MiB for 100K.");
+            addNote(notes, "Search RAM is the accounted steady-state search working-set budget: query vectors plus one raw/decoded chunk or one compressed TurboQuant range, blocked SIMD copy, and search caches.");
+            addNote(notes, "Vector staging is the method-specific vector payload held for the active disk chunk/range; Search RAM is the full accounted vector working-set cap, including query and search scratch.");
+            addNote(notes, "All methods are disk-backed, including FP32. The full 50K/100K stores stay on disk; only bounded chunks/ranges enter RAM. The cap excludes app/UI memory, Rust/runtime/dependency code, allocator overhead, and OS file cache. It is 30 MiB for both 50K and 100K.");
+            addNote(notes, "ms/query uses query-major latency probes (8 self + 8 random): one probe scans every bounded chunk or compressed range before the next probe starts, so chunks/ranges are not reused across unrelated requests. Recall still uses all 1000 self + 1000 random queries. TurboQuant range load and preparation are included in probe latency.");
             addNote(notes, "TurboQuant reads bounded .tv ranges, searches each range, merges top-10 results, and releases the range before loading the next one.");
             JSONArray noteArray = report.getJSONArray("notes");
             for (int i = 0; i < noteArray.length(); i++) {

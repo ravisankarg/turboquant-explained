@@ -17,50 +17,50 @@ const androidBenchRows = [
   {
     dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 32,
     selfR1: "100.00%", selfR10: "100.00%", randomR10: "100.00%",
-    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0, selfMs: 4750.4, randomMs: 4750.4,
-    msQuery: 4.750, rom: "146.5 MB", romMb: 146.5, vectorRam: "30.0 MiB cap"
+    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0,
+    msQuery: 119.741, rom: "146.5 MB", romMb: 146.5, dataStore: "disk-backed", vectorStaging: "24.1 MB raw f32", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 16,
     selfR1: "100.00%", selfR10: "99.89%", randomR10: "99.65%",
-    indexMs: 94.2, prepMs: 0.0, writeMs: 24.2, selfMs: 6152.2, randomMs: 8177.2,
-    msQuery: 7.165, rom: "73.2 MB", romMb: 73.2, vectorRam: "30.0 MiB cap"
+    indexMs: 86.1, prepMs: 0.0, writeMs: 23.4,
+    msQuery: 164.716, rom: "73.2 MB", romMb: 73.2, dataStore: "disk-backed", vectorStaging: "24.1 MB decoded f32", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 8,
     selfR1: "100.00%", selfR10: "98.97%", randomR10: "98.61%",
-    indexMs: 2756.1, prepMs: 2935.1, writeMs: 22.1, selfMs: 17139.7, randomMs: 17679.8,
-    msQuery: 17.410, rom: "36.8 MB", romMb: 36.8, vectorRam: "30.0 MiB cap"
+    indexMs: 1231.0, prepMs: 17906.1, writeMs: 14.3,
+    msQuery: 1144.697, rom: "36.8 MB", romMb: 36.8, dataStore: "disk-backed", vectorStaging: "23.6 MB 8-bit range", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 4,
     selfR1: "100.00%", selfR10: "91.51%", randomR10: "88.21%",
-    indexMs: 3193.2, prepMs: 1489.4, writeMs: 14.1, selfMs: 878.0, randomMs: 855.2,
-    msQuery: 0.867, rom: "18.5 MB", romMb: 18.5, vectorRam: "30.0 MiB cap"
+    indexMs: 1200.3, prepMs: 7972.0, writeMs: 12.2,
+    msQuery: 499.583, rom: "18.5 MB", romMb: 18.5, dataStore: "disk-backed", vectorStaging: "22.9 MB 4-bit range", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 32,
     selfR1: "100.00%", selfR10: "100.00%", randomR10: "100.00%",
-    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0, selfMs: 40749.4, randomMs: 40749.4,
-    msQuery: 40.749, rom: "293.0 MB", romMb: 293.0, vectorRam: "50.0 MiB cap"
+    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0,
+    msQuery: 363.430, rom: "293.0 MB", romMb: 293.0, dataStore: "disk-backed", vectorStaging: "24.1 MB raw f32", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 16,
     selfR1: "100.00%", selfR10: "99.74%", randomR10: "99.73%",
-    indexMs: 328.1, prepMs: 0.0, writeMs: 81.8, selfMs: 22634.9, randomMs: 10169.0,
-    msQuery: 16.402, rom: "146.5 MB", romMb: 146.5, vectorRam: "50.0 MiB cap"
+    indexMs: 347.5, prepMs: 0.0, writeMs: 91.2,
+    msQuery: 539.497, rom: "146.5 MB", romMb: 146.5, dataStore: "disk-backed", vectorStaging: "24.1 MB decoded f32", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 8,
-    selfR1: "100.00%", selfR10: "99.19%", randomR10: "98.65%",
-    indexMs: 4424.8, prepMs: 2450.6, writeMs: 58.8, selfMs: 21897.5, randomMs: 18842.3,
-    msQuery: 20.370, rom: "73.6 MB", romMb: 73.6, vectorRam: "50.0 MiB cap"
+    selfR1: "100.00%", selfR10: "99.15%", randomR10: "98.66%",
+    indexMs: 4616.2, prepMs: 42517.6, writeMs: 50.4,
+    msQuery: 2723.837, rom: "73.6 MB", romMb: 73.6, dataStore: "disk-backed", vectorStaging: "23.6 MB 8-bit range", vectorRam: "30.0 MiB cap"
   },
   {
     dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 4,
-    selfR1: "100.00%", selfR10: "92.06%", randomR10: "88.02%",
-    indexMs: 2422.4, prepMs: 781.7, writeMs: 17.7, selfMs: 496.9, randomMs: 469.6,
-    msQuery: 0.483, rom: "37.0 MB", romMb: 37.0, vectorRam: "50.0 MiB cap"
+    selfR1: "100.00%", selfR10: "92.01%", randomR10: "87.95%",
+    indexMs: 2202.1, prepMs: 16321.0, writeMs: 19.3,
+    msQuery: 1023.149, rom: "37.0 MB", romMb: 37.0, dataStore: "disk-backed", vectorStaging: "22.9 MB 4-bit range", vectorRam: "30.0 MiB cap"
   }
 ];
 
@@ -302,10 +302,10 @@ function renderAndroidBench() {
         <td>${row.indexMs.toFixed(1)}</td>
         <td>${row.prepMs.toFixed(1)}</td>
         <td>${row.writeMs.toFixed(1)}</td>
-        <td>${row.selfMs.toFixed(1)}</td>
-        <td>${row.randomMs.toFixed(1)}</td>
         <td>${row.msQuery.toFixed(3)}</td>
         <td>${row.rom}</td>
+        <td>${row.dataStore}</td>
+        <td>${row.vectorStaging}</td>
         <td>${row.vectorRam}</td>
       </tr>
     `).join("");
