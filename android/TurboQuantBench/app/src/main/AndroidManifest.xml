@@ -27,5 +27,10 @@
             android:name=".BenchmarkService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <provider
+            android:name=".BenchmarkReportProvider"
+            android:authorities="com.turboquant.benchmark.reports"
+            android:exported="true"
+            android:grantUriPermissions="false" />
     </application>
 </manifest>

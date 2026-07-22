@@ -55,8 +55,9 @@ pub mod search;
 pub use error::{AddError, ConstructError};
 pub use id_map::IdMapIndex;
 
+use std::io::{Read, Seek};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 const ROTATION_SEED: u64 = 42;
 const BLOCK: usize = 32;
@@ -112,6 +113,29 @@ struct BlockedCache {
     n_blocks: usize,
 }
 
+/// Read-only search state shared by bounded ranges of the same index.
+///
+/// Rotation and centroid tables depend only on `(dim, bit_width)` and are
+/// independent of the vector range. Sharing them avoids rebuilding the
+/// expensive deterministic QR/codebook state for every range and every
+/// one-query request while leaving the range-specific blocked code layout
+/// bounded to the active range.
+#[derive(Clone)]
+pub struct SearchCache {
+    rotation: Arc<Vec<f32>>,
+    centroids: Arc<Vec<f32>>,
+}
+
+impl SearchCache {
+    pub fn new(dim: usize, bit_width: usize) -> Self {
+        let (_, centroids) = codebook::codebook(bit_width, dim);
+        Self {
+            rotation: Arc::new(rotation::make_rotation_matrix(dim)),
+            centroids: Arc::new(centroids),
+        }
+    }
+}
+
 pub struct TurboQuantIndex {
     /// Vector dimensionality. `None` means the index was constructed
     /// without a known dim (lazy mode) and hasn't seen its first add yet.
@@ -143,9 +167,9 @@ pub struct TurboQuantIndex {
     // `rotation`, `boundaries`, and `centroids` are deterministic functions
     // of `(dim, ROTATION_SEED)` and `(bit_width, dim)`, so they never need
     // to be invalidated.
-    rotation: OnceLock<Vec<f32>>,
+    rotation: OnceLock<Arc<Vec<f32>>>,
     boundaries: OnceLock<Vec<f32>>,
-    centroids: OnceLock<Vec<f32>>,
+    centroids: OnceLock<Arc<Vec<f32>>>,
     blocked: OnceLock<BlockedCache>,
 }
 
@@ -271,11 +295,11 @@ impl TurboQuantIndex {
 
         let rotation = self
             .rotation
-            .get_or_init(|| rotation::make_rotation_matrix(dim));
+            .get_or_init(|| Arc::new(rotation::make_rotation_matrix(dim)));
         if self.boundaries.get().is_none() || self.centroids.get().is_none() {
             let (boundaries, centroids) = codebook::codebook(self.bit_width, dim);
             let _ = self.boundaries.set(boundaries);
-            let _ = self.centroids.set(centroids);
+            let _ = self.centroids.set(Arc::new(centroids));
         }
         let boundaries = self
             .boundaries
@@ -405,6 +429,66 @@ impl TurboQuantIndex {
         self.search_with_mask(queries, k, None)
     }
 
+    /// Low-overhead single-query search for online/query-major callers.
+    ///
+    /// The batched [`Self::search`] API deliberately uses a matrix multiply
+    /// and multi-query dispatch. For `nq == 1` that setup dominates small
+    /// bounded ranges and, on ARM, the generic 4-bit path also materialises a
+    /// score row before finding top-k. This entry point keeps the same scoring
+    /// semantics but rotates one query, scores directly into one top-k heap,
+    /// and never allocates an `n_vectors` score matrix.
+    pub fn search_one(&self, query: &[f32], k: usize) -> SearchResults {
+        let Some(dim) = self.dim else {
+            return SearchResults {
+                scores: Vec::new(),
+                indices: Vec::new(),
+                nq: 1,
+                k: 0,
+            };
+        };
+        assert_eq!(query.len(), dim);
+        if let Some((vi, ci, v)) = first_invalid_coord(query, dim) {
+            panic!(
+                "invalid query value at query {vi}, coord {ci}: {v} \
+                 (must be finite and |value| < 1e16 to avoid f32 overflow)",
+            );
+        }
+
+        let rotation = self
+            .rotation
+            .get_or_init(|| Arc::new(rotation::make_rotation_matrix(dim)));
+        let centroids = self.centroids.get_or_init(|| {
+            let (_, c) = codebook::codebook(self.bit_width, dim);
+            Arc::new(c)
+        });
+        let blocked = self.blocked.get_or_init(|| {
+            let (data, n_blocks) =
+                pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
+            BlockedCache { data, n_blocks }
+        });
+        let (scores, indices) = search::search_one(
+            query,
+            rotation,
+            &blocked.data,
+            centroids,
+            &self.scales,
+            &self.tqplus_shift,
+            &self.tqplus_scale,
+            self.bit_width,
+            dim,
+            self.n_vectors,
+            blocked.n_blocks,
+            k.min(self.n_vectors),
+        );
+        let effective_k = scores.len().min(indices.len());
+        SearchResults {
+            scores,
+            indices,
+            nq: 1,
+            k: effective_k,
+        }
+    }
+
     /// Run a top-`k` search restricted to slots whose `mask` entry is `true`.
     ///
     /// `mask`, when `Some`, must have length equal to [`Self::len`]. Only
@@ -452,10 +536,10 @@ impl TurboQuantIndex {
 
         let rotation = self
             .rotation
-            .get_or_init(|| rotation::make_rotation_matrix(dim));
+            .get_or_init(|| Arc::new(rotation::make_rotation_matrix(dim)));
         let centroids = self.centroids.get_or_init(|| {
             let (_, c) = codebook::codebook(self.bit_width, dim);
-            c
+            Arc::new(c)
         });
         let blocked = self.blocked.get_or_init(|| {
             let (data, n_blocks) =
@@ -525,11 +609,26 @@ impl TurboQuantIndex {
         // — dim is unknown and the caches depend on it.
         let Some(dim) = self.dim else { return };
         self.rotation
-            .get_or_init(|| rotation::make_rotation_matrix(dim));
+            .get_or_init(|| Arc::new(rotation::make_rotation_matrix(dim)));
         self.centroids.get_or_init(|| {
             let (_, c) = codebook::codebook(self.bit_width, dim);
-            c
+            Arc::new(c)
         });
+        self.blocked.get_or_init(|| {
+            let (data, n_blocks) =
+                pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
+            BlockedCache { data, n_blocks }
+        });
+    }
+
+    /// Populate the range-specific blocked layout while reusing deterministic
+    /// rotation and centroid tables supplied by the caller.
+    pub fn prepare_with_cache(&self, cache: &SearchCache) {
+        let Some(dim) = self.dim else { return };
+        self.rotation
+            .get_or_init(|| Arc::clone(&cache.rotation));
+        self.centroids
+            .get_or_init(|| Arc::clone(&cache.centroids));
         self.blocked.get_or_init(|| {
             let (data, n_blocks) =
                 pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
@@ -549,6 +648,28 @@ impl TurboQuantIndex {
             self.dim.unwrap_or(0),
             self.n_vectors,
             &self.packed_codes,
+            &self.scales,
+            &self.tqplus_shift,
+            &self.tqplus_scale,
+        )
+    }
+
+    /// Persist the architecture-specific blocked layout used by the SIMD
+    /// scorer. This is a sidecar rather than a replacement for `.tv`, so
+    /// existing packed indexes remain portable and backwards compatible.
+    pub fn write_blocked(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        self.prepare();
+        let blocked = self
+            .blocked
+            .get()
+            .expect("prepare must initialise the blocked cache");
+        io::write_blocked(
+            path,
+            self.bit_width,
+            self.dim.unwrap_or(0),
+            self.n_vectors,
+            blocked.n_blocks,
+            &blocked.data,
             &self.scales,
             &self.tqplus_shift,
             &self.tqplus_scale,
@@ -593,6 +714,91 @@ impl TurboQuantIndex {
             tqplus_shift,
             tqplus_scale,
         ))
+    }
+
+    /// Load one positional range from an already-open reader. The caller
+    /// owns the reader and may reuse it for subsequent bounded ranges.
+    pub fn load_range_from_reader<R: Read + Seek>(
+        reader: &mut R,
+        start_vector: usize,
+        count: usize,
+    ) -> std::io::Result<Self> {
+        let (bit_width, dim, n_vectors, packed_codes, scales, tqplus_shift, tqplus_scale) =
+            io::load_range_reader(reader, start_vector, count)?;
+        Ok(Self::from_parts(
+            Some(dim),
+            bit_width,
+            n_vectors,
+            packed_codes,
+            scales,
+            tqplus_shift,
+            tqplus_scale,
+        ))
+    }
+
+    /// Load one positional range from a persisted SIMD-blocked sidecar.
+    /// Unlike [`Self::load_range_from_reader`], this does not allocate packed
+    /// codes or repack them before search.
+    pub fn load_blocked_range_from_reader<R: Read + Seek>(
+        reader: &mut R,
+        start_vector: usize,
+        count: usize,
+    ) -> std::io::Result<Self> {
+        let (
+            bit_width,
+            dim,
+            n_vectors,
+            n_blocks,
+            blocked_codes,
+            scales,
+            tqplus_shift,
+            tqplus_scale,
+        ) = io::load_blocked_range_reader(reader, start_vector, count)?;
+        Ok(Self::from_blocked_parts(
+            Some(dim),
+            bit_width,
+            n_vectors,
+            n_blocks,
+            blocked_codes,
+            scales,
+            tqplus_shift,
+            tqplus_scale,
+        ))
+    }
+
+    fn from_blocked_parts(
+        dim: Option<usize>,
+        bit_width: usize,
+        n_vectors: usize,
+        n_blocks: usize,
+        blocked_codes: Vec<u8>,
+        scales: Vec<f32>,
+        tqplus_shift: Vec<f32>,
+        tqplus_scale: Vec<f32>,
+    ) -> Self {
+        let d = dim.expect("blocked range must have a committed dimension");
+        let expected = n_blocks * (d / (8 / bit_width)) * BLOCK;
+        assert_eq!(blocked_codes.len(), expected);
+        assert_eq!(scales.len(), n_vectors);
+        assert_eq!(tqplus_shift.len(), tqplus_scale.len());
+        let blocked_lock = OnceLock::new();
+        let _ = blocked_lock.set(BlockedCache {
+            data: blocked_codes,
+            n_blocks,
+        });
+        Self {
+            dim,
+            bit_width,
+            n_vectors,
+            packed_codes: Vec::new(),
+            scales,
+            tqplus_shift,
+            tqplus_scale,
+            rotation: OnceLock::new(),
+            boundaries: OnceLock::new(),
+            centroids: OnceLock::new(),
+            blocked: blocked_lock,
+        }
     }
 
     pub(crate) fn from_parts(

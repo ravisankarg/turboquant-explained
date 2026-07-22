@@ -1,72 +1,96 @@
-# Latest S25 Ultra Benchmark Results
+# S25 Ultra benchmark results
 
-Device: Samsung Galaxy S25 Ultra class device reported by ADB as `SM_S938B`.
+These are the current v0.5 measurements pulled directly from the APK's cached JSON reports on a Samsung Galaxy S25 Ultra class device (`SM_S938B`, arm64-v8a). One Cohere 100K, 768-dimensional FP32 slice supplies separate 50K and 100K tables. The datasets are not added together.
 
-Measured dataset: one downloaded 100K Cohere 768-dimensional FP32 slice. The APK benchmarks 50K and 100K as separate tables from that file; the counts are not added together. HNSW is disabled for this experiment.
+Each report uses 1,000 self queries, 1,000 deterministic normalized random-mixture queries, top-k 10, and exact FP32 top-10 ground truth. All payload stores are disk-backed. The pure-vector search cap is 30.0 MB for 50K and 50.0 MB for 100K; it is not an Android process-RSS cap.
 
-Queries:
+The tables omit index/build, prep, and write columns. Index construction is one-time and excluded from `ms/query`. FlatIndex build times are listed once per timing path. HNSW used the persisted graph/payload cache, so graph construction is excluded from timed search.
 
-- 1000 self queries: first 1000 base vectors.
-- 1000 random queries: deterministic normalized random mixtures.
-- Top-k: 10.
-- Recall baseline: exact FP32 top-10 over the same table dataset size.
+## FlatIndex A — real traffic / query-major
 
-## KPI Tables
+One timed query scans every bounded chunk or compressed range, completes its top-10, then the next query starts. Threads: 1 timed query worker; 8 Rayon workers for recall/truth and preparation. One-time FlatIndex build (`index_ms`): 50K — FP32 0.0, FP16 80.4, 8-bit 1,922.6, 4-bit 943.4 ms; 100K — FP32 0.0, FP16 175.2, 8-bit 2,361.3, 4-bit 2,486.6 ms.
 
-| Method | Dataset | Vectors | Bits | Self R@1 | Self R@10 | Random R@10 | Index ms | Prep/load ms | Write ms | ms/query | ROM | Data store | Vector staging | Search RAM |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|
-| FlatIndex | Cohere 50K | 50K | 32 | 100.00% | 100.00% | 100.00% | 0.0 | 0.0 | 0.0 | 119.741 | 146.5 MB | disk-backed | 24.1 MB raw f32 | 30.0 MiB cap |
-| FlatIndex | Cohere 50K | 50K | 16 | 100.00% | 99.89% | 99.65% | 86.1 | 0.0 | 23.4 | 164.716 | 73.2 MB | disk-backed | 24.1 MB decoded f32 | 30.0 MiB cap |
-| FlatIndex | Cohere 50K | 50K | 8 | 100.00% | 98.97% | 98.61% | 1231.0 | 17906.1 | 14.3 | 1144.697 | 36.8 MB | disk-backed | 23.6 MB 8-bit range | 30.0 MiB cap |
-| FlatIndex | Cohere 50K | 50K | 4 | 100.00% | 91.51% | 88.21% | 1200.3 | 7972.0 | 12.2 | 499.583 | 18.5 MB | disk-backed | 22.9 MB 4-bit range | 30.0 MiB cap |
-| FlatIndex | Cohere 100K | 100K | 32 | 100.00% | 100.00% | 100.00% | 0.0 | 0.0 | 0.0 | 363.430 | 293.0 MB | disk-backed | 24.1 MB raw f32 | 30.0 MiB cap |
-| FlatIndex | Cohere 100K | 100K | 16 | 100.00% | 99.74% | 99.73% | 347.5 | 0.0 | 91.2 | 539.497 | 146.5 MB | disk-backed | 24.1 MB decoded f32 | 30.0 MiB cap |
-| FlatIndex | Cohere 100K | 100K | 8 | 100.00% | 99.15% | 98.66% | 4616.2 | 42517.6 | 50.4 | 2723.837 | 73.6 MB | disk-backed | 23.6 MB 8-bit range | 30.0 MiB cap |
-| FlatIndex | Cohere 100K | 100K | 4 | 100.00% | 92.01% | 87.95% | 2202.1 | 16321.0 | 19.3 | 1023.149 | 37.0 MB | disk-backed | 22.9 MB 4-bit range | 30.0 MiB cap |
+| Dataset | Bits | Self R@1 | Self R@10 | Random R@10 | ms/query | ROM | Vector staging (RAM only) | Search RAM cap |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| Cohere 50K | 32 | 100.00% | 100.00% | 100.00% | 35.061 | 146.5 MB | 29.0 MB raw FP32 chunk | 30.0 MB |
+| Cohere 50K | 16 | 100.00% | 99.89% | 99.64% | 136.253 | 73.2 MB | 28.9 MB raw FP16 + fused dot | 30.0 MB |
+| Cohere 50K | 8 | 100.00% | 99.99% | 100.00% | 46.551 | 36.8 MB | 28.9 MB blocked 8-bit range | 30.0 MB |
+| Cohere 50K | 4 | 100.00% | 99.99% | 100.00% | 19.153 | 18.5 MB | 28.9 MB blocked 4-bit range | 30.0 MB |
+| Cohere 100K | 32 | 100.00% | 100.00% | 100.00% | 73.689 | 293.0 MB | 49.0 MB raw FP32 chunk | 50.0 MB |
+| Cohere 100K | 16 | 100.00% | 99.74% | 99.73% | 161.029 | 146.5 MB | 48.9 MB raw FP16 + fused dot | 50.0 MB |
+| Cohere 100K | 8 | 100.00% | 100.00% | 100.00% | 119.751 | 73.6 MB | 48.9 MB blocked 8-bit range | 50.0 MB |
+| Cohere 100K | 4 | 100.00% | 100.00% | 100.00% | 54.799 | 37.0 MB | 48.9 MB blocked 4-bit range | 50.0 MB |
 
-## Legend and Header Definitions
+## FlatIndex B — batched throughput
 
-- `Dataset`: downloaded vector slice; the current APK uses Cohere 50K and Cohere 100K tables.
-- `Vectors`: number of base vectors in that row.
-- `Method`: search implementation.
-- `Bits`: bits per vector coordinate.
-- `Self R@1`: percent of self queries where the original vector is ranked first.
-- `Self R@10`: mean `|approximate top-10 ∩ exact FP32 top-10| / 10` over self queries. A 9/10 overlap is 90%, not 100%.
-- `Random R@10`: the same mean top-10 overlap over deterministic normalized random-mixture queries. Random R@1 is intentionally not reported.
-- `Index ms`: method-specific construction time: zero for the raw FP32 reference, FP16 conversion time for the persisted FP16 file, and add/quantize/in-memory storage for TurboQuant.
-- `Prep/load ms`: total persisted range loading and search-layout preparation observed across the query-major run. For TurboQuant this work is also included in end-to-end `ms/query` because ranges are not resident between requests.
-- `Write ms`: persisted `.tv` index write time.
-- `ms/query`: total query-major latency-probe time divided by 16 probes, in milliseconds. The probes are 8 self + 8 random queries; each probe scans every bounded chunk/range before the next starts, so chunks/ranges are not reused across unrelated requests. TurboQuant range load and preparation are included. Recall still uses 1000 self + 1000 random queries.
-- `ROM`: persisted index file size.
-- `Data store`: all four methods are disk-backed; the full 50K/100K stores are not resident in RAM.
-- `Vector staging`: method-specific vector payload held for the active disk chunk/range. FP32 uses raw f32; FP16 uses decoded f32; the low-bit rows use their compressed active ranges.
-- `Search RAM`: total accounted steady-state pure-vector budget, not overall Android process RSS.
+Each bounded chunk/range is loaded once and searched against all 2,000 queries. Threads: 8 Rayon workers in the timed range-major batch. One-time FlatIndex build (`index_ms`): 50K — FP32 0.0, FP16 90.8, 8-bit 1,253.9, 4-bit 1,031.2 ms; 100K — FP32 0.0, FP16 213.5, 8-bit 2,802.8, 4-bit 3,653.1 ms.
 
-## Current experiment conditions
+| Dataset | Bits | Self R@1 | Self R@10 | Random R@10 | ms/query | ROM | Vector staging (RAM only) | Search RAM cap |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| Cohere 50K | 32 | 100.00% | 100.00% | 100.00% | 1.318 | 146.5 MB | 23.1 MB raw FP32 chunk | 30.0 MB |
+| Cohere 50K | 16 | 100.00% | 99.89% | 99.64% | 1.324 | 73.2 MB | 23.1 MB decoded FP32 chunk | 30.0 MB |
+| Cohere 50K | 8 | 100.00% | 99.14% | 98.65% | 4.705 | 36.8 MB | 22.7 MB blocked 8-bit range | 30.0 MB |
+| Cohere 50K | 4 | 100.00% | 99.99% | 100.00% | 0.651 | 18.5 MB | 21.9 MB blocked 4-bit range | 30.0 MB |
+| Cohere 100K | 32 | 100.00% | 100.00% | 100.00% | 3.343 | 293.0 MB | 43.1 MB raw FP32 chunk | 50.0 MB |
+| Cohere 100K | 16 | 100.00% | 99.74% | 99.73% | 3.461 | 146.5 MB | 43.1 MB decoded FP32 chunk | 50.0 MB |
+| Cohere 100K | 8 | 100.00% | 99.16% | 98.63% | 12.820 | 73.6 MB | 42.7 MB blocked 8-bit range | 50.0 MB |
+| Cohere 100K | 4 | 100.00% | 100.00% | 100.00% | 1.369 | 37.0 MB | 41.9 MB blocked 4-bit range | 50.0 MB |
 
-The current APK uses a total accounted steady-state search RAM budget of 30 MiB for both 50K and 100K. `Search RAM` includes query vectors plus one active raw/decoded chunk or one persisted TurboQuant range, its blocked SIMD copy, and search caches. App/UI memory, Rust/runtime/dependency code, allocator overhead, OS file cache, and persisted ROM are excluded. Temporary full-index build/preparation peaks are also outside this steady-state search KPI.
+## HNSW A — real traffic / query-major
 
-`Raw FP32 chunk vectors` means the number of uncompressed 768-d FP32 vectors staged from disk at once: 8,218 for both 50K and 100K. Each vector is 3,072 bytes, so the raw chunk itself is approximately 24.1 MiB; query and working buffers consume the remaining cap. This is a bounded chunk size, not the total number of vectors. FP16 has the same decoded f32 staging size even though its persisted disk representation is 16-bit.
+One query traverses the resident graph, reads candidate vectors, finishes top-10, then the next starts. Threads: 1 timed query worker; 8 Rayon workers for recall/truth and preparation. Parameters: `M=16`, `efConstruction=128`, `efSearch=1024`, `max layers=8`, base degree ≤32. The compact graph is resident; payload vectors remain disk-backed. Graph construction was a persistent-cache hit and is excluded.
 
-FP16 reads its persisted cache in bounded decoded chunks. TurboQuant reads bounded `.tv` ranges, searches each range, merges top-10 results, and releases the range before loading the next one.
+| Dataset | Bits | Self R@1 | Self R@10 | Random R@10 | ms/query | ROM | Vector staging (RAM only) | Graph/search RAM |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| Cohere 50K | 32 | 99.90% | 99.75% | 98.99% | 70.392 | 227.4 MB | 6.0 MB FP16 navigation cache + FP32 candidate scratch | ≤30.0 MB |
+| Cohere 50K | 16 | 99.90% | 99.65% | 98.65% | 67.577 | 80.9 MB | 6.0 MB FP16 navigation cache | ≤30.0 MB |
+| Cohere 50K | 8 | 99.90% | 99.75% | 98.99% | 292.741 | 154.6 MB | 6.0 MB cache + compressed block + FP32 scratch | ≤30.0 MB |
+| Cohere 50K | 4 | 99.90% | 99.75% | 98.99% | 265.853 | 117.9 MB | 6.0 MB cache + compressed block + FP32 scratch | ≤30.0 MB |
+| Cohere 100K | 32 | 99.30% | 99.50% | 98.42% | 80.161 | 454.8 MB | 6.0 MB FP16 navigation cache + FP32 candidate scratch | ≤50.0 MB |
+| Cohere 100K | 16 | 99.30% | 99.25% | 98.22% | 73.792 | 161.9 MB | 6.0 MB FP16 navigation cache | ≤50.0 MB |
+| Cohere 100K | 8 | 99.30% | 99.50% | 98.42% | 285.574 | 309.1 MB | 6.0 MB cache + compressed block + FP32 scratch | ≤50.0 MB |
+| Cohere 100K | 4 | 99.30% | 99.50% | 98.42% | 303.364 | 235.9 MB | 6.0 MB cache + compressed block + FP32 scratch | ≤50.0 MB |
 
-Latency uses query-major probes to model one-query-at-a-time use: FP32 and FP16 load every bounded chunk for each probe, and TurboQuant loads/prepares every compressed range for each probe, before moving to the next probe. The 30 MiB cap applies to each active query working set; the full 1000+1000 query workload remains for recall.
+## HNSW B — batched throughput
 
-On the arm64 S25 Ultra path, 8-bit is slower than FP16 despite its smaller ROM because FP16 uses a simple dense dot-product scan after decoding, while 8-bit also pays per-range load/preparation plus query rotation/calibration and scalar byte-code/centroid lookups for every dimension. The 4-bit path uses the optimized NEON nibble-LUT kernel, so its loaded-range compute is efficient, but the query-major disk-backed KPI includes per-request range staging/preparation. It is faster than 8-bit here, but not faster than FP32 end-to-end: 499.583 vs 119.741 ms/query at 50K and 1023.149 vs 363.430 ms/query at 100K.
+The resident graph is shared while 2,000 queries search in parallel. Threads: 8 Rayon workers in the timed batch; each worker has a bounded 256-vector FP16 candidate cache. Parameters are the same as HNSW A. Graph construction is one-time and excluded.
 
-## Reading The Results
+| Dataset | Bits | Self R@1 | Self R@10 | Random R@10 | ms/query | ROM | Vector staging (RAM only) | Graph/search RAM |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| Cohere 50K | 32 | 99.90% | 99.75% | 98.99% | 16.848 | 227.4 MB | 384 KB FP16 candidates/worker + FP32 scratch | ≤30.0 MB |
+| Cohere 50K | 16 | 99.90% | 99.65% | 98.65% | 6.948 | 80.9 MB | 384 KB FP16 candidates/worker | ≤30.0 MB |
+| Cohere 50K | 8 | 99.90% | 99.75% | 98.99% | 72.618 | 154.6 MB | 384 KB cache + compressed block + FP32 scratch | ≤30.0 MB |
+| Cohere 50K | 4 | 99.90% | 99.75% | 98.99% | 64.260 | 117.9 MB | 384 KB cache + compressed block + FP32 scratch | ≤30.0 MB |
+| Cohere 100K | 32 | 99.30% | 99.50% | 98.42% | 20.054 | 454.8 MB | 384 KB FP16 candidates/worker + FP32 scratch | ≤50.0 MB |
+| Cohere 100K | 16 | 99.30% | 99.25% | 98.22% | 18.967 | 161.9 MB | 384 KB FP16 candidates/worker | ≤50.0 MB |
+| Cohere 100K | 8 | 99.30% | 99.50% | 98.42% | 83.506 | 309.1 MB | 384 KB cache + compressed block + FP32 scratch | ≤50.0 MB |
+| Cohere 100K | 4 | 99.30% | 99.50% | 98.42% | 75.411 | 235.9 MB | 384 KB cache + compressed block + FP32 scratch | ≤50.0 MB |
 
-For one-query-at-a-time end-to-end search, use `ms/query`. It averages 16 independent latency probes, includes bounded disk staging, and includes per-range load/preparation for TurboQuant.
+## Definitions
 
-For cold first query after loading/building an index without calling `prepare()`:
+- `Self R@1`: percentage of self queries whose original vector is ranked first. Random R@1 is omitted.
+- `Self R@10` and `Random R@10`: mean top-10 overlap with exact FP32 top-10. A 9/10 overlap is 90%, not 100%.
+- `ms/query`: milliseconds per query. Query-major timing is the production-style independent-request number. Batched timing divides one reused 2,000-query batch by 2,000 and is throughput only.
+- `Vector staging (RAM only)`: active vector payload memory, not overall app RAM. UI, Rust/runtime/dependency libraries, allocator overhead, OS page cache, persisted ROM, and temporary full-index build peaks are excluded.
+- `Search RAM cap`: pure-vector steady-state cap, 30 MB for 50K and 50 MB for 100K. Full raw FP32 and compressed stores remain on disk. HNSW graph adjacency is reported separately in `Graph/search RAM`.
+- FlatIndex query-major raw FP32 staging is 9,897 vectors for 50K and 16,724 for 100K. Batched staging is 7,898 and 14,725. These are bounded windows, not resident databases.
+- FlatIndex A/B 4-bit exact-reranks up to 256 compressed candidates from raw FP32 disk reads. HNSW 8/4-bit rows also exact-rerank bounded graph candidates.
 
-```text
-cold latency = prep ms + one search latency
+## Optimization analysis
+
+FlatIndex A uses direct bounded file reads, persistent blocked ranges, direct top-k heaps, and low-bit candidate reranking. FlatIndex B changes only the scheduling model: each range is loaded once and searched against the full batch with eight Rayon workers. That is why B is much faster per query but is not representative of isolated traffic.
+
+HNSW uses the `M=16`, `efConstruction=128`, `efSearch=1024` graph configuration. The high `efSearch` is the recall/latency tradeoff that keeps every random R@10 above 98%. Candidate vector blocks are read with bounded direct file spans; A uses a larger shared FP16 cache and B uses a small per-worker cache. The graph is resident, but payload vectors are not.
+
+On ARM, FP32/four-query dot products and the 4-bit nibble-LUT scorer use NEON. The 8-bit path is smaller on disk but pays range preparation, query rotation/calibration, and scalar byte-indexed centroid lookups; FP16 has a simpler dense conversion-and-dot loop. The 4-bit LUT arithmetic is fast, but end-to-end rows still include disk staging and exact reranking. No GPU result is claimed because the APK has no verified Vulkan/NNAPI search kernel and this one-query workload is dominated by disk/candidate I/O.
+
+The lowest current random R@10 is 98.22%, so all 32 method/dataset rows meet the requested 98% floor.
+
+## Pull a report directly from the release APK
+
+```bash
+adb exec-out content read \
+  --uri 'content://com.turboquant.benchmark.reports/report?mode=query_major'
 ```
 
-For warm production use:
-
-```text
-call prepare() once
-then use ms/query as search latency
-```
+Valid modes are `query_major`, `batched_throughput`, `hnsw_query_major`, and `hnsw_batched_throughput`.
