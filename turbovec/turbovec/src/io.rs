@@ -28,6 +28,8 @@ use std::path::Path;
 
 const TV_MAGIC: &[u8; 4] = b"TVPI";
 const TV_VERSION: u8 = 3;
+const TVPB_MAGIC: &[u8; 4] = b"TVPB";
+const TVPB_VERSION: u8 = 1;
 const TVIM_MAGIC: &[u8; 4] = b"TVIM";
 const TVIM_VERSION: u8 = 3;
 
@@ -38,6 +40,20 @@ const REBUILD_HINT: &str =
 
 /// Core payload — what a fully-deserialized index needs.
 pub(crate) type CoreLoad = (usize, usize, usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<f32>);
+
+/// Blocked-layout payload used by the query-major benchmark. The blocked
+/// bytes are already in the architecture-specific layout consumed by the
+/// SIMD scorer, so a request can load a range without repacking it first.
+pub(crate) type BlockedLoad = (
+    usize,
+    usize,
+    usize,
+    usize,
+    Vec<u8>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+);
 
 /// `.tv` write — positional index.
 pub fn write(
@@ -59,6 +75,65 @@ pub fn write(
     )?;
     f.flush()?;
     Ok(())
+}
+
+/// Write a query-optimised, SIMD-blocked sidecar. The sidecar deliberately
+/// uses a separate magic/version so the canonical packed `.tv` format remains
+/// backwards compatible. Its layout tag prevents an x86 blocked file from
+/// being accidentally consumed by the ARM sequential scorer (or vice versa).
+pub(crate) fn write_blocked(
+    path: impl AsRef<Path>,
+    bit_width: usize,
+    dim: usize,
+    n_vectors: usize,
+    n_blocks: usize,
+    blocked_codes: &[u8],
+    scales: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
+) -> io::Result<()> {
+    let mut f = BufWriter::new(File::create(path)?);
+    let n_byte_groups = dim / (8 / bit_width);
+    let expected_blocked = n_blocks
+        .checked_mul(n_byte_groups)
+        .and_then(|x| x.checked_mul(crate::BLOCK))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "blocked size overflows usize"))?;
+    if blocked_codes.len() != expected_blocked || scales.len() != n_vectors {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "blocked payload shape mismatch: codes={}, expected {}; scales={}, expected {}",
+                blocked_codes.len(), expected_blocked, scales.len(), n_vectors
+            ),
+        ));
+    }
+    if tqplus_shift.len() != tqplus_scale.len()
+        || (!tqplus_shift.is_empty() && tqplus_shift.len() != dim)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid TQ+ calibration lengths",
+        ));
+    }
+
+    f.write_all(TVPB_MAGIC)?;
+    f.write_all(&[TVPB_VERSION, blocked_layout_tag(), bit_width as u8])?;
+    f.write_all(&(dim as u32).to_le_bytes())?;
+    f.write_all(&(n_vectors as u32).to_le_bytes())?;
+    f.write_all(&(n_blocks as u32).to_le_bytes())?;
+    f.write_all(blocked_codes)?;
+    for &s in scales {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    let n_calib = tqplus_shift.len() as u32;
+    f.write_all(&n_calib.to_le_bytes())?;
+    for &s in tqplus_shift {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    for &s in tqplus_scale {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    f.flush()
 }
 
 /// `.tv` load — positional index. Transparently handles v2 (no TQ+) and
@@ -105,6 +180,22 @@ pub(crate) fn load_range(
     count: usize,
 ) -> io::Result<CoreLoad> {
     let mut f = BufReader::new(File::open(path)?);
+    load_range_reader(&mut f, start_vector, count)
+}
+
+/// Load one positional range from an already-open reader. Keeping the reader
+/// open is useful to bounded-memory callers that scan many ranges per
+/// request: the range seeks remain positional, but file-open/header setup is
+/// not repeated for every range.
+pub(crate) fn load_range_reader<R: Read + Seek>(
+    mut f: &mut R,
+    start_vector: usize,
+    count: usize,
+) -> io::Result<CoreLoad> {
+    // A caller may reuse the reader for multiple ranges. Header offsets are
+    // relative to the beginning of the file, so reset before parsing each
+    // range rather than assuming the reader is newly opened.
+    f.seek(SeekFrom::Start(0))?;
 
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
@@ -203,6 +294,141 @@ pub(crate) fn load_range(
         tqplus_shift,
         tqplus_scale,
     ))
+}
+
+/// Load one range from a persisted blocked sidecar. `start_vector` must be
+/// block-aligned; the final range may be shorter than one full block.
+pub(crate) fn load_blocked_range_reader<R: Read + Seek>(
+    mut f: &mut R,
+    start_vector: usize,
+    count: usize,
+) -> io::Result<BlockedLoad> {
+    f.seek(SeekFrom::Start(0))?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)?;
+    if &magic != TVPB_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a turbovec blocked sidecar: wrong magic",
+        ));
+    }
+    let mut fixed = [0u8; 3];
+    f.read_exact(&mut fixed)?;
+    if fixed[0] != TVPB_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported blocked sidecar version: {}", fixed[0]),
+        ));
+    }
+    if fixed[1] != blocked_layout_tag() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "blocked sidecar layout does not match this CPU architecture",
+        ));
+    }
+    let bit_width = fixed[2] as usize;
+    if !matches!(bit_width, 2 | 3 | 4 | 8) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid blocked bit_width {bit_width}"),
+        ));
+    }
+    let mut nums = [0u8; 12];
+    f.read_exact(&mut nums)?;
+    let dim = u32::from_le_bytes(nums[0..4].try_into().unwrap()) as usize;
+    let n_vectors = u32::from_le_bytes(nums[4..8].try_into().unwrap()) as usize;
+    let n_blocks = u32::from_le_bytes(nums[8..12].try_into().unwrap()) as usize;
+    if dim == 0 || dim % 8 != 0 || dim > crate::MAX_DIM {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid blocked dim {dim}"),
+        ));
+    }
+    let expected_blocks = (n_vectors + crate::BLOCK - 1) / crate::BLOCK;
+    if n_blocks != expected_blocks || start_vector > n_vectors || count > n_vectors - start_vector {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid blocked sidecar vector range",
+        ));
+    }
+    if start_vector % crate::BLOCK != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "blocked sidecar range must start on a 32-vector boundary",
+        ));
+    }
+    let end_vector = start_vector + count;
+    let block_count = (count + crate::BLOCK - 1) / crate::BLOCK;
+    if end_vector < n_vectors && count % crate::BLOCK != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "non-final blocked sidecar range must contain whole blocks",
+        ));
+    }
+
+    let n_byte_groups = dim / (8 / bit_width);
+    let bytes_per_block = n_byte_groups
+        .checked_mul(crate::BLOCK)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked block size overflows usize"))?;
+    let total_blocked_bytes = n_blocks
+        .checked_mul(bytes_per_block)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked payload size overflows usize"))?;
+    let header_end = f.stream_position()?;
+    let range_offset = header_end
+        .checked_add(
+            (start_vector / crate::BLOCK)
+                .checked_mul(bytes_per_block)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked range offset overflows"))?
+                as u64,
+        )
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked range offset overflows"))?;
+    f.seek(SeekFrom::Start(range_offset))?;
+    let blocked_codes = read_exact_vec(
+        &mut f,
+        block_count
+            .checked_mul(bytes_per_block)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked range size overflows"))?,
+    )?;
+
+    let scales_offset = header_end
+        .checked_add(total_blocked_bytes as u64)
+        .and_then(|x| x.checked_add((start_vector * 4) as u64))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked scales offset overflows"))?;
+    f.seek(SeekFrom::Start(scales_offset))?;
+    let scales = read_f32_array(&mut f, count)?;
+
+    let calibration_offset = header_end
+        .checked_add(total_blocked_bytes as u64)
+        .and_then(|x| x.checked_add((n_vectors * 4) as u64))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blocked calibration offset overflows"))?;
+    f.seek(SeekFrom::Start(calibration_offset))?;
+    let (tqplus_shift, tqplus_scale) = read_tqplus_trailer(&mut f, dim)?;
+
+    Ok((
+        bit_width,
+        dim,
+        count,
+        block_count,
+        blocked_codes,
+        scales,
+        tqplus_shift,
+        tqplus_scale,
+    ))
+}
+
+#[cfg(target_arch = "aarch64")]
+const fn blocked_layout_tag() -> u8 {
+    1
+}
+
+#[cfg(target_arch = "x86_64")]
+const fn blocked_layout_tag() -> u8 {
+    2
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+const fn blocked_layout_tag() -> u8 {
+    3
 }
 
 /// `.tvim` write — positional index plus the id-map side-tables.

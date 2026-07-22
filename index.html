@@ -300,59 +300,36 @@
         <p class="eyebrow">Android benchmark app</p>
         <h2>S25 Ultra vector-search benchmark</h2>
         <p>
-          This repo now includes VectorDB 3.0, a native Android app that downloads one 100K Cohere 768-dimensional vector slice, then benchmarks separate 50K and 100K FlatIndex tables. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app compares FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit flat scans on-device, uses a 30 MiB pure-vector search RAM cap for both tables, and reports recall, index size, ROM, data-store mode, vector staging, and one-query latency probes.
+          This repo includes VectorDB 3.0, a native Android app that downloads one 100K Cohere 768-dimensional vector slice, then benchmarks separate 50K and 100K FlatIndex and HNSW tables. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. Each index family has two distinct paths: A) real-traffic query-major latency and B) batched throughput. Both paths compare FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit payloads with disk-backed bounded reads.
         </p>
-        <p class="section-note">The table below is the latest installed v0.3 APK result: separate 50K/100K tables, bounded disk reads, standard mean top-10 overlap recall, and HNSW disabled.</p>
+        <p class="section-note">Latest verified release: v0.5 on the S25 (`SM_S938B`). Every row clears the 98% random R@10 floor. The tables below are populated from the four cached JSON report files pulled directly over ADB.</p>
         <div class="hero-actions bench-actions">
-          <a class="button primary" href="releases/android/vecdb-release-v0.3.apk">Download vecdb-release-v0.3 APK</a>
+          <a class="button primary" href="releases/android/vecdb-release-v0.5.apk">Download vecdb-release-v0.5 APK</a>
           <a class="button ghost" href="android/TurboQuantBench/">Open Android source</a>
           <a class="button ghost" href="turbovec/turbovec/src/search.rs">Open Rust search code</a>
         </div>
-        <p class="section-note">Release v0.3, versionCode 4. SHA-256: <code>d1df34c225409e0af7a438e65f862cdbd03d552bdf618fa3aa328810336adae0</code>.</p>
+        <p class="section-note">Release v0.5, versionCode 6. SHA-256: <code>98d3a42165d4ce7fa596a23a399b3d01319d5dedbc1602ce46d64a46022b201c</code>.</p>
       </div>
 
       <div class="bench-hero-grid">
         <article class="bench-stat">
           <span>Best current one-query latency</span>
-          <strong>119.741 ms/query</strong>
-          <p>FP32 FlatIndex over 50K vectors, including bounded disk staging.</p>
+          <strong>19.153 ms/query</strong>
+          <p>Best current query-major row: FlatIndex 4-bit over 50K, with exact candidate rerank.</p>
         </article>
         <article class="bench-stat">
           <span>8-bit ARM caveat</span>
-          <strong>1144.697 vs 164.716</strong>
-          <p>50K 8-bit vs FP16 end-to-end ms/query; range preparation and scalar byte lookups dominate 8-bit.</p>
+          <strong>46.551 vs 136.253</strong>
+          <p>50K FlatIndex A: 8-bit vs FP16. Smaller ROM does not remove scalar byte-code and range-prep work.</p>
         </article>
         <article class="bench-stat">
           <span>Pure-vector RAM caps</span>
-          <strong>30 / 30 MiB</strong>
-          <p>50K / 100K search working-set budgets; not total Android process RSS.</p>
+          <strong>30 / 50 MB</strong>
+          <p>50K / 100K pure-vector search caps; not total Android process RSS.</p>
         </article>
       </div>
 
-      <div class="bench-table-wrap">
-        <table class="bench-table">
-          <thead>
-            <tr>
-              <th>Method</th>
-              <th>Dataset</th>
-              <th>Vectors</th>
-              <th>Bits</th>
-              <th>Self R@1</th>
-              <th>Self R@10</th>
-              <th>Random R@10</th>
-              <th>Index ms</th>
-              <th>Prep/load ms</th>
-              <th>Write ms</th>
-              <th>ms/query</th>
-              <th>ROM</th>
-              <th>Data store</th>
-              <th>Vector staging</th>
-              <th>Search RAM</th>
-            </tr>
-          </thead>
-          <tbody id="androidKpiTable"></tbody>
-        </table>
-      </div>
+      <div id="androidBenchTables" class="bench-table-stack"></div>
 
       <div class="bench-viz-grid">
         <article class="panel">
@@ -379,22 +356,18 @@
             <dd>Self-query recall against exact FP32 top-10. R@1 means the original vector is ranked first. R@10 is mean top-10 overlap; a 9/10 overlap is 90%, not 100%.</dd>
             <dt>Random R@10</dt>
             <dd>Mean fraction of the 10 exact FP32 top-10 neighbors recovered by the approximate top-10 for deterministic normalized random mixture queries. Random R@1 is intentionally omitted.</dd>
-            <dt>Index ms</dt>
-            <dd>Method-specific construction time: zero for the raw FP32 reference, FP16 conversion time for the persisted FP16 file, and add/quantize/in-memory storage for TurboQuant.</dd>
-            <dt>Prep/load ms</dt>
-            <dd>Total persisted range loading and search-layout preparation observed across the query-major run. For TurboQuant it is also included in end-to-end <code>ms/query</code> because ranges are not resident between requests.</dd>
-            <dt>Write ms</dt>
-            <dd>Time to write the persisted FP16 or TurboQuant <code>.tv</code> index file.</dd>
+            <dt>ms/query</dt>
+            <dd>Milliseconds per query, not microseconds. Query-major A completes one independent query across every bounded chunk/range or graph candidate frontier before the next. Batched B divides a reused 2,000-query workload by 2,000 and is throughput only.</dd>
             <dt>Data store</dt>
-            <dd>All four methods are disk-backed; the complete 50K/100K stores are not resident in RAM.</dd>
+            <dd>All payloads are disk-backed; the complete 50K/100K stores are not resident in RAM. HNSW adjacency is compact and resident, while its payload vectors remain on disk.</dd>
             <dt>Vector staging</dt>
             <dd>Method-specific vector payload held for the active disk chunk/range. FP32 uses raw f32, FP16 uses decoded f32, and low-bit rows use their compressed active ranges.</dd>
             <dt>Search RAM</dt>
-            <dd>Total accounted steady-state pure-vector budget: 30 MiB for both 50K and 100K. It includes query vectors and one active raw/decoded chunk or compressed range plus search layout/caches.</dd>
-            <dt>ms/query</dt>
-            <dd>Total query-major latency-probe time divided by 16 probes, in milliseconds. The probes are 8 self + 8 random; each probe scans every bounded chunk/range before the next starts, so chunks/ranges are not reused across unrelated requests. TurboQuant range load and preparation are included. Recall still uses 1000 + 1000 queries.</dd>
+            <dd>Active vector payload in RAM only, not overall app RAM. UI, runtime/dependency libraries, allocator overhead, OS page cache, persisted ROM, and temporary build peaks are outside this KPI.</dd>
+            <dt>Search RAM cap</dt>
+            <dd>Pure-vector steady-state cap: 30 MiB for 50K and 50 MiB for 100K. It is not total Android process RSS.</dd>
             <dt>Raw FP32 chunk vectors</dt>
-            <dd>Uncompressed 768-d FP32 vectors staged from disk at once: 8,218 for both 50K and 100K. This is a chunk size, not the total dataset size. FP16 uses the same decoded f32 staging size even though its disk representation is 16-bit.</dd>
+            <dd>Uncompressed 768-d FP32 vectors staged from disk at once: 9,897 for 50K and 16,724 for 100K in query-major A; 7,898 and 14,725 in batched B. These are chunk sizes, not resident databases.</dd>
           </dl>
         </article>
         <article>
@@ -403,13 +376,17 @@
             <dt>FP32 exact</dt>
             <dd>Brute-force exact dot-product scan over all vectors in the selected dataset. It is used as ground truth for recall.</dd>
             <dt>FlatIndex methods</dt>
-            <dd>All four current rows scan every vector: raw FP32, persisted IEEE FP16, TurboQuant 8-bit, and TurboQuant 4-bit. HNSW is disabled so the comparison isolates flat-search speed under the fixed vector budget.</dd>
+            <dd>FlatIndex scans every vector; HNSW traverses a compact M=16 graph. Both families have A query-major and B batched-throughput paths, with the same 30/50 MiB pure-vector caps.</dd>
+            <dt>HNSW parameters</dt>
+            <dd><code>M=16</code>, <code>efConstruction=128</code>, <code>efSearch=1024</code>, max layers 8, base degree at most 32. The larger search frontier is the recall/latency tradeoff that keeps random R@10 above 98%.</dd>
             <dt>FP16 disk scan</dt>
             <dd>Persists IEEE FP16, decodes one bounded chunk into FP32 staging memory, scans it, then releases it before the next chunk.</dd>
             <dt>8-bit TurboQuant</dt>
-            <dd>Uses rotation, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer. Its main byte-indexed centroid lookup loop is scalar because ARM lacks an efficient FP32 gather-by-byte instruction, so it can be slower than FP16 despite smaller ROM.</dd>
+            <dd>Uses rotation, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer. Its main byte-indexed centroid lookup loop is scalar, so it can be slower than FP16 despite smaller ROM.</dd>
             <dt>4-bit TurboQuant</dt>
             <dd>Uses bit-plane packed codes, blocked 32-vector layout, per-query nibble LUTs, and ARM NEON lookup accumulation. The kernel is efficient, but this one-query KPI also includes loading and preparing every bounded range.</dd>
+            <dt>GPU</dt>
+            <dd>No GPU number is claimed: the APK has no verified Vulkan/NNAPI search kernel, and this disk/candidate-I/O workload would make unmeasured dispatch and transfer overhead misleading.</dd>
           </dl>
         </article>
       </div>
@@ -419,7 +396,7 @@
           <h3>Current benchmark conditions</h3>
           <span>VectorDB 3.0</span>
         </div>
-        <p>The current APK accounts for a 30 MiB steady-state search working-set budget for both 50K and 100K. All methods, including FP32, are disk-backed: FP32 and FP16 scan bounded raw/decoded chunks; TurboQuant reads bounded <code>.tv</code> ranges, searches each range, merges top-10 results, and releases the range before loading the next one. The raw FP32 staging window is 8,218 vectors, about 24.1 MiB of raw f32 data; query and working buffers use the rest of the cap. The displayed <code>ms/query</code> averages 16 query-major latency probes (8 self + 8 random); each probe scans every bounded chunk/range before the next starts, and TurboQuant range load/preparation is included. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build/preparation peaks are outside this KPI. HNSW is disabled.</p>
+        <p>The current APK uses a pure-vector search cap of 30 MiB for 50K and 50 MiB for 100K. Even FP32 is disk-backed: query-major A reads bounded raw chunks, while batched B reuses one bounded chunk across the 2,000-query batch. TurboQuant reads bounded compressed ranges; HNSW keeps compact adjacency resident but reads payload candidates from disk. Query-major raw FP32 windows are 9,897 vectors at 50K and 16,724 at 100K; batched windows are 7,898 and 14,725. These are staging windows, not resident databases. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build peaks are outside the KPI. The global minimum random R@10 is 98.22%.</p>
       </div>
 
       <div class="native-stack">

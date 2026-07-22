@@ -13,56 +13,70 @@ const polarPairDequant = [
   [-0.108, 0.061],
   [-10.191, 0.177]
 ];
-const androidBenchRows = [
+function benchRow(dataset, bits, selfR1, selfR10, randomR10, msQuery, rom, vectorStaging, ram) {
+  return { dataset, vectors: dataset.replace("Cohere ", ""), bits, selfR1, selfR10, randomR10, msQuery, rom, romMb: Number.parseFloat(rom), vectorStaging, vectorRam: ram };
+}
+
+const androidBenchTables = [
   {
-    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 32,
-    selfR1: "100.00%", selfR10: "100.00%", randomR10: "100.00%",
-    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0,
-    msQuery: 119.741, rom: "146.5 MB", romMb: 146.5, dataStore: "disk-backed", vectorStaging: "24.1 MB raw f32", vectorRam: "30.0 MiB cap"
+    title: "FlatIndex — A) real traffic / query-major",
+    note: "1 timed query worker; 8 Rayon workers for recall/truth and preparation. One-time build: 50K FP32 0.0, FP16 80.4, 8-bit 1,922.6, 4-bit 943.4 ms; 100K FP32 0.0, FP16 175.2, 8-bit 2,361.3, 4-bit 2,486.6 ms.",
+    rows: [
+      benchRow("Cohere 50K", 32, "100.00%", "100.00%", "100.00%", 35.061, "146.5 MB", "29.0 MB raw FP32 chunk", "30.0 MB"),
+      benchRow("Cohere 50K", 16, "100.00%", "99.89%", "99.64%", 136.253, "73.2 MB", "28.9 MB raw FP16 + fused dot", "30.0 MB"),
+      benchRow("Cohere 50K", 8, "100.00%", "99.99%", "100.00%", 46.551, "36.8 MB", "28.9 MB blocked 8-bit range", "30.0 MB"),
+      benchRow("Cohere 50K", 4, "100.00%", "99.99%", "100.00%", 19.153, "18.5 MB", "28.9 MB blocked 4-bit range", "30.0 MB"),
+      benchRow("Cohere 100K", 32, "100.00%", "100.00%", "100.00%", 73.689, "293.0 MB", "49.0 MB raw FP32 chunk", "50.0 MB"),
+      benchRow("Cohere 100K", 16, "100.00%", "99.74%", "99.73%", 161.029, "146.5 MB", "48.9 MB raw FP16 + fused dot", "50.0 MB"),
+      benchRow("Cohere 100K", 8, "100.00%", "100.00%", "100.00%", 119.751, "73.6 MB", "48.9 MB blocked 8-bit range", "50.0 MB"),
+      benchRow("Cohere 100K", 4, "100.00%", "100.00%", "100.00%", 54.799, "37.0 MB", "48.9 MB blocked 4-bit range", "50.0 MB")
+    ]
   },
   {
-    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 16,
-    selfR1: "100.00%", selfR10: "99.89%", randomR10: "99.65%",
-    indexMs: 86.1, prepMs: 0.0, writeMs: 23.4,
-    msQuery: 164.716, rom: "73.2 MB", romMb: 73.2, dataStore: "disk-backed", vectorStaging: "24.1 MB decoded f32", vectorRam: "30.0 MiB cap"
+    title: "FlatIndex — B) batched throughput",
+    note: "8 Rayon workers in the timed range-major batch. Each bounded chunk/range is reused across 2,000 queries. One-time build: 50K FP32 0.0, FP16 90.8, 8-bit 1,253.9, 4-bit 1,031.2 ms; 100K FP32 0.0, FP16 213.5, 8-bit 2,802.8, 4-bit 3,653.1 ms.",
+    rows: [
+      benchRow("Cohere 50K", 32, "100.00%", "100.00%", "100.00%", 1.318, "146.5 MB", "23.1 MB raw FP32 chunk", "30.0 MB"),
+      benchRow("Cohere 50K", 16, "100.00%", "99.89%", "99.64%", 1.324, "73.2 MB", "23.1 MB decoded FP32 chunk", "30.0 MB"),
+      benchRow("Cohere 50K", 8, "100.00%", "99.14%", "98.65%", 4.705, "36.8 MB", "22.7 MB blocked 8-bit range", "30.0 MB"),
+      benchRow("Cohere 50K", 4, "100.00%", "99.99%", "100.00%", 0.651, "18.5 MB", "21.9 MB blocked 4-bit range", "30.0 MB"),
+      benchRow("Cohere 100K", 32, "100.00%", "100.00%", "100.00%", 3.343, "293.0 MB", "43.1 MB raw FP32 chunk", "50.0 MB"),
+      benchRow("Cohere 100K", 16, "100.00%", "99.74%", "99.73%", 3.461, "146.5 MB", "43.1 MB decoded FP32 chunk", "50.0 MB"),
+      benchRow("Cohere 100K", 8, "100.00%", "99.16%", "98.63%", 12.820, "73.6 MB", "42.7 MB blocked 8-bit range", "50.0 MB"),
+      benchRow("Cohere 100K", 4, "100.00%", "100.00%", "100.00%", 1.369, "37.0 MB", "41.9 MB blocked 4-bit range", "50.0 MB")
+    ]
   },
   {
-    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 8,
-    selfR1: "100.00%", selfR10: "98.97%", randomR10: "98.61%",
-    indexMs: 1231.0, prepMs: 17906.1, writeMs: 14.3,
-    msQuery: 1144.697, rom: "36.8 MB", romMb: 36.8, dataStore: "disk-backed", vectorStaging: "23.6 MB 8-bit range", vectorRam: "30.0 MiB cap"
+    title: "HNSW — A) real traffic / query-major",
+    note: "1 timed query worker; 8 Rayon workers for recall/truth and preparation. M=16, efConstruction=128, efSearch=1024, max layers=8, base degree ≤32. Compact graph resident; payload vectors disk-backed. Graph build was a persistent-cache hit.",
+    rows: [
+      benchRow("Cohere 50K", 32, "99.90%", "99.75%", "98.99%", 70.392, "227.4 MB", "6.0 MB FP16 navigation cache + FP32 candidate scratch", "≤30.0 MB"),
+      benchRow("Cohere 50K", 16, "99.90%", "99.65%", "98.65%", 67.577, "80.9 MB", "6.0 MB FP16 navigation cache", "≤30.0 MB"),
+      benchRow("Cohere 50K", 8, "99.90%", "99.75%", "98.99%", 292.741, "154.6 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤30.0 MB"),
+      benchRow("Cohere 50K", 4, "99.90%", "99.75%", "98.99%", 265.853, "117.9 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤30.0 MB"),
+      benchRow("Cohere 100K", 32, "99.30%", "99.50%", "98.42%", 80.161, "454.8 MB", "6.0 MB FP16 navigation cache + FP32 candidate scratch", "≤50.0 MB"),
+      benchRow("Cohere 100K", 16, "99.30%", "99.25%", "98.22%", 73.792, "161.9 MB", "6.0 MB FP16 navigation cache", "≤50.0 MB"),
+      benchRow("Cohere 100K", 8, "99.30%", "99.50%", "98.42%", 285.574, "309.1 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤50.0 MB"),
+      benchRow("Cohere 100K", 4, "99.30%", "99.50%", "98.42%", 303.364, "235.9 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤50.0 MB")
+    ]
   },
   {
-    dataset: "Cohere 50K", vectors: "50K", method: "FlatIndex", bits: 4,
-    selfR1: "100.00%", selfR10: "91.51%", randomR10: "88.21%",
-    indexMs: 1200.3, prepMs: 7972.0, writeMs: 12.2,
-    msQuery: 499.583, rom: "18.5 MB", romMb: 18.5, dataStore: "disk-backed", vectorStaging: "22.9 MB 4-bit range", vectorRam: "30.0 MiB cap"
-  },
-  {
-    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 32,
-    selfR1: "100.00%", selfR10: "100.00%", randomR10: "100.00%",
-    indexMs: 0.0, prepMs: 0.0, writeMs: 0.0,
-    msQuery: 363.430, rom: "293.0 MB", romMb: 293.0, dataStore: "disk-backed", vectorStaging: "24.1 MB raw f32", vectorRam: "30.0 MiB cap"
-  },
-  {
-    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 16,
-    selfR1: "100.00%", selfR10: "99.74%", randomR10: "99.73%",
-    indexMs: 347.5, prepMs: 0.0, writeMs: 91.2,
-    msQuery: 539.497, rom: "146.5 MB", romMb: 146.5, dataStore: "disk-backed", vectorStaging: "24.1 MB decoded f32", vectorRam: "30.0 MiB cap"
-  },
-  {
-    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 8,
-    selfR1: "100.00%", selfR10: "99.15%", randomR10: "98.66%",
-    indexMs: 4616.2, prepMs: 42517.6, writeMs: 50.4,
-    msQuery: 2723.837, rom: "73.6 MB", romMb: 73.6, dataStore: "disk-backed", vectorStaging: "23.6 MB 8-bit range", vectorRam: "30.0 MiB cap"
-  },
-  {
-    dataset: "Cohere 100K", vectors: "100K", method: "FlatIndex", bits: 4,
-    selfR1: "100.00%", selfR10: "92.01%", randomR10: "87.95%",
-    indexMs: 2202.1, prepMs: 16321.0, writeMs: 19.3,
-    msQuery: 1023.149, rom: "37.0 MB", romMb: 37.0, dataStore: "disk-backed", vectorStaging: "22.9 MB 4-bit range", vectorRam: "30.0 MiB cap"
+    title: "HNSW — B) batched throughput",
+    note: "8 Rayon workers in the timed graph-search batch; each worker has a bounded 256-vector FP16 candidate cache. M=16, efConstruction=128, efSearch=1024, max layers=8, base degree ≤32. Graph build is one-time and excluded.",
+    rows: [
+      benchRow("Cohere 50K", 32, "99.90%", "99.75%", "98.99%", 16.848, "227.4 MB", "384 KB FP16 candidates/worker + FP32 scratch", "≤30.0 MB"),
+      benchRow("Cohere 50K", 16, "99.90%", "99.65%", "98.65%", 6.948, "80.9 MB", "384 KB FP16 candidates/worker", "≤30.0 MB"),
+      benchRow("Cohere 50K", 8, "99.90%", "99.75%", "98.99%", 72.618, "154.6 MB", "384 KB cache + compressed block + FP32 scratch", "≤30.0 MB"),
+      benchRow("Cohere 50K", 4, "99.90%", "99.75%", "98.99%", 64.260, "117.9 MB", "384 KB cache + compressed block + FP32 scratch", "≤30.0 MB"),
+      benchRow("Cohere 100K", 32, "99.30%", "99.50%", "98.42%", 20.054, "454.8 MB", "384 KB FP16 candidates/worker + FP32 scratch", "≤50.0 MB"),
+      benchRow("Cohere 100K", 16, "99.30%", "99.25%", "98.22%", 18.967, "161.9 MB", "384 KB FP16 candidates/worker", "≤50.0 MB"),
+      benchRow("Cohere 100K", 8, "99.30%", "99.50%", "98.42%", 83.506, "309.1 MB", "384 KB cache + compressed block + FP32 scratch", "≤50.0 MB"),
+      benchRow("Cohere 100K", 4, "99.30%", "99.50%", "98.42%", 75.411, "235.9 MB", "384 KB cache + compressed block + FP32 scratch", "≤50.0 MB")
+    ]
   }
 ];
+
+const androidBenchRows = androidBenchTables[0].rows;
 
 function renderBars(targetId, values, maxAbs = Math.max(...values.map(Math.abs))) {
   const target = document.getElementById(targetId);
@@ -288,26 +302,46 @@ function renderQuantTable() {
 }
 
 function renderAndroidBench() {
-  const table = document.getElementById("androidKpiTable");
-  if (table) {
-    table.innerHTML = androidBenchRows.map(row => `
-      <tr>
-        <td class="method">${row.method}</td>
-        <td>${row.dataset}</td>
-        <td>${row.vectors}</td>
-        <td>${row.bits}</td>
-        <td>${row.selfR1}</td>
-        <td>${row.selfR10}</td>
-        <td>${row.randomR10}</td>
-        <td>${row.indexMs.toFixed(1)}</td>
-        <td>${row.prepMs.toFixed(1)}</td>
-        <td>${row.writeMs.toFixed(1)}</td>
-        <td>${row.msQuery.toFixed(3)}</td>
-        <td>${row.rom}</td>
-        <td>${row.dataStore}</td>
-        <td>${row.vectorStaging}</td>
-        <td>${row.vectorRam}</td>
-      </tr>
+  const target = document.getElementById("androidBenchTables");
+  if (target) {
+    target.innerHTML = androidBenchTables.map(table => `
+      <article class="bench-table-wrap">
+        <div class="panel-head">
+          <h3>${table.title}</h3>
+          <span>recall floor &gt; 98%</span>
+        </div>
+        <p class="section-note">${table.note}</p>
+        <div class="table-scroll">
+          <table class="bench-table">
+            <thead>
+              <tr>
+                <th>Dataset</th>
+                <th>Bits</th>
+                <th>Self R@1</th>
+                <th>Self R@10</th>
+                <th>Random R@10</th>
+                <th>ms/query</th>
+                <th>ROM</th>
+                <th>Vector staging (RAM only)</th>
+                <th>Search/graph RAM</th>
+              </tr>
+            </thead>
+            <tbody>${table.rows.map(row => `
+              <tr>
+                <td>${row.dataset}</td>
+                <td>${row.bits}</td>
+                <td>${row.selfR1}</td>
+                <td>${row.selfR10}</td>
+                <td>${row.randomR10}</td>
+                <td>${row.msQuery.toFixed(3)}</td>
+                <td>${row.rom}</td>
+                <td>${row.vectorStaging}</td>
+                <td>${row.vectorRam}</td>
+              </tr>
+            `).join("")}</tbody>
+          </table>
+        </div>
+      </article>
     `).join("");
   }
 

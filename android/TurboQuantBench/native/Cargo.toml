@@ -6,6 +6,12 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+
 [dependencies]
 half = "2.7.1"
 jni = "0.21"

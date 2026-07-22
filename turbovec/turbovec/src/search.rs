@@ -1292,6 +1292,259 @@ fn build_query_neon_lut_from_slice(
     QueryNeonLut { uint8_luts, scale, bias }
 }
 
+/// Single-query search path used by online callers. It intentionally avoids
+/// the batched GEMM/Rayon setup and writes top-k directly while scoring. The
+/// public multi-query path remains unchanged for throughput workloads.
+#[allow(clippy::too_many_arguments)]
+pub fn search_one(
+    query: &[f32],
+    rotation: &[f32],
+    blocked_codes: &[u8],
+    centroids: &[f32],
+    vec_scales: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
+    bits: usize,
+    dim: usize,
+    n_vectors: usize,
+    n_blocks: usize,
+    k: usize,
+) -> (Vec<f32>, Vec<i64>) {
+    if k == 0 || n_vectors == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let q_rot = rotate_query_one(query, rotation, dim);
+    let (q_for_lut, bias_corr) = calibrate_query_one(&q_rot, tqplus_shift, tqplus_scale);
+    let mut heap_s = vec![f32::NEG_INFINITY; k];
+    let mut heap_i = vec![0u32; k];
+    let mut heap_sz = 0usize;
+    let mut heap_min = f32::NEG_INFINITY;
+    let mut heap_mi = 0usize;
+    let n_byte_groups = dim / (8 / bits);
+
+    if bits == 8 {
+        #[cfg(target_arch = "x86_64")]
+        score_8bit_query_into_heap(
+            &q_for_lut,
+            bias_corr,
+            blocked_codes,
+            centroids,
+            vec_scales,
+            dim,
+            n_vectors,
+            n_blocks,
+            None,
+            k,
+            &mut heap_s,
+            &mut heap_i,
+            &mut heap_sz,
+            &mut heap_min,
+            &mut heap_mi,
+        );
+        #[cfg(not(target_arch = "x86_64"))]
+        score_8bit_query_into_heap_blocked(
+            &q_for_lut,
+            bias_corr,
+            blocked_codes,
+            centroids,
+            vec_scales,
+            dim,
+            n_vectors,
+            n_blocks,
+            None,
+            k,
+            &mut heap_s,
+            &mut heap_i,
+            &mut heap_sz,
+            &mut heap_min,
+            &mut heap_mi,
+        );
+    } else {
+        let mut lut = build_query_neon_lut_from_slice(&q_for_lut, centroids, bits, dim);
+        lut.bias += bias_corr;
+
+        #[cfg(target_arch = "aarch64")]
+        for block_idx in 0..n_blocks {
+            let base_vec = block_idx * BLOCK;
+            let block_offset = block_idx * n_byte_groups * BLOCK;
+            let mut block_out = [0.0f32; BLOCK];
+            unsafe {
+                score_4bit_block_neon(
+                    blocked_codes,
+                    &lut.uint8_luts,
+                    block_offset,
+                    n_byte_groups,
+                    lut.scale,
+                    lut.bias,
+                    vec_scales,
+                    base_vec,
+                    n_vectors,
+                    &mut block_out,
+                );
+            }
+            let end = (n_vectors - base_vec).min(BLOCK);
+            for lane in 0..end {
+                push_heap_score(
+                    block_out[lane],
+                    (base_vec + lane) as u32,
+                    k,
+                    &mut heap_s,
+                    &mut heap_i,
+                    &mut heap_sz,
+                    &mut heap_min,
+                    &mut heap_mi,
+                );
+            }
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        score_query_into_heap(
+            &lut.uint8_luts,
+            lut.scale,
+            lut.bias,
+            blocked_codes,
+            vec_scales,
+            n_byte_groups,
+            n_vectors,
+            n_blocks,
+            None,
+            k,
+            &mut heap_s,
+            &mut heap_i,
+            &mut heap_sz,
+            &mut heap_min,
+            &mut heap_mi,
+        );
+    }
+
+    let mut pairs: Vec<(f32, u32)> = heap_s[..heap_sz]
+        .iter()
+        .zip(heap_i[..heap_sz].iter())
+        .map(|(&score, &idx)| (score, idx))
+        .collect();
+    pairs.sort_unstable_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (
+        pairs.iter().map(|p| p.0).collect(),
+        pairs.iter().map(|p| p.1 as i64).collect(),
+    )
+}
+
+#[inline]
+fn rotate_query_one(query: &[f32], rotation: &[f32], dim: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; dim];
+    for d in 0..dim {
+        let row = &rotation[d * dim..(d + 1) * dim];
+        #[cfg(target_arch = "aarch64")]
+        let mut sum = unsafe {
+            use std::arch::aarch64::*;
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut a2 = vdupq_n_f32(0.0);
+            let mut a3 = vdupq_n_f32(0.0);
+            let mut i = 0usize;
+            while i + 16 <= dim {
+                a0 = vfmaq_f32(a0, vld1q_f32(query.as_ptr().add(i)), vld1q_f32(row.as_ptr().add(i)));
+                a1 = vfmaq_f32(a1, vld1q_f32(query.as_ptr().add(i + 4)), vld1q_f32(row.as_ptr().add(i + 4)));
+                a2 = vfmaq_f32(a2, vld1q_f32(query.as_ptr().add(i + 8)), vld1q_f32(row.as_ptr().add(i + 8)));
+                a3 = vfmaq_f32(a3, vld1q_f32(query.as_ptr().add(i + 12)), vld1q_f32(row.as_ptr().add(i + 12)));
+                i += 16;
+            }
+            let mut total = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
+            while i + 4 <= dim {
+                total = vfmaq_f32(total, vld1q_f32(query.as_ptr().add(i)), vld1q_f32(row.as_ptr().add(i)));
+                i += 4;
+            }
+            let mut scalar = 0.0f32;
+            while i < dim {
+                scalar += query[i] * row[i];
+                i += 1;
+            }
+            vaddvq_f32(total) + scalar
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let mut sum = {
+            let mut a0 = 0.0f32;
+            let mut a1 = 0.0f32;
+            let mut a2 = 0.0f32;
+            let mut a3 = 0.0f32;
+            let mut i = 0usize;
+            while i + 4 <= dim {
+                a0 += query[i] * row[i];
+                a1 += query[i + 1] * row[i + 1];
+                a2 += query[i + 2] * row[i + 2];
+                a3 += query[i + 3] * row[i + 3];
+                i += 4;
+            }
+            while i < dim {
+                a0 += query[i] * row[i];
+                i += 1;
+            }
+            a0 + a1 + a2 + a3
+        };
+        out[d] = sum;
+    }
+    out
+}
+
+fn calibrate_query_one(
+    q_rot: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
+) -> (Vec<f32>, f32) {
+    if tqplus_shift.is_empty() {
+        return (q_rot.to_vec(), 0.0);
+    }
+    let mut q_calib = vec![0.0f32; q_rot.len()];
+    let mut bias = 0.0f64;
+    for d in 0..q_rot.len() {
+        q_calib[d] = q_rot[d] / tqplus_scale[d];
+        bias -= (q_rot[d] as f64) * (tqplus_shift[d] as f64);
+    }
+    (q_calib, bias as f32)
+}
+
+#[inline]
+fn push_heap_score(
+    score: f32,
+    idx: u32,
+    k: usize,
+    heap_s: &mut [f32],
+    heap_i: &mut [u32],
+    heap_sz: &mut usize,
+    heap_min: &mut f32,
+    heap_mi: &mut usize,
+) {
+    if *heap_sz < k {
+        heap_s[*heap_sz] = score;
+        heap_i[*heap_sz] = idx;
+        *heap_sz += 1;
+        if *heap_sz == k {
+            *heap_min = heap_s[0];
+            *heap_mi = 0;
+            for h in 1..k {
+                if heap_s[h] < *heap_min {
+                    *heap_min = heap_s[h];
+                    *heap_mi = h;
+                }
+            }
+        }
+    } else if score > *heap_min {
+        heap_s[*heap_mi] = score;
+        heap_i[*heap_mi] = idx;
+        *heap_min = heap_s[0];
+        *heap_mi = 0;
+        for h in 1..k {
+            if heap_s[h] < *heap_min {
+                *heap_min = heap_s[h];
+                *heap_mi = h;
+            }
+        }
+    }
+}
+
 /// Slot-allowlist bitmask: packed little-endian, bit `i` set iff slot `i` is
 /// allowed. Caller guarantees `len * 64 >= n_vectors`. Bits at index `>=
 /// n_vectors` are ignored.
