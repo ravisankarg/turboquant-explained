@@ -1,11 +1,10 @@
 //! Encode vectors: normalize, rotate, calibrate, quantize, bit-pack, scale.
 //!
-//! For each vector `v` with rotated unit form `u` and reconstructed
-//! centroid vector `x_hat`, the stored scale is `||v|| / <u, x_hat>` —
-//! the RaBitQ-style length-renormalization correction adapted to
-//! turbovec's Lloyd-Max codebook. Applying this scale at the final
-//! score-multiplication site in the SIMD kernel gives an unbiased
-//! estimator of `<v, q>`.
+//! For each vector `v` with rotated unit form `u` and reconstructed centroid
+//! vector `x_hat`, the stored scalar is the least-squares projection
+//! `||v|| * <u, x_hat> / ||x_hat||²`. Applying this scalar at the final
+//! score-multiplication site gives the best one-scalar reconstruction of the
+//! source vector using only the persisted bit-width payload.
 //!
 //! # TQ+ per-coordinate calibration
 //!
@@ -133,6 +132,38 @@ pub fn encode(
     (packed, scales, shift, scale_tq)
 }
 
+/// Fit TQ+ calibration from a representative sample without adding those
+/// vectors to an index. Benchmark and streaming callers can use this before
+/// chunked `add` calls so calibration is representative of the whole source
+/// store rather than being locked to whichever chunk happens to be first.
+pub(crate) fn fit_calibration(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    rotation: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(vectors.len(), n * dim);
+    let mut norms = vec![0.0f32; n];
+    let mut unit_flat = vec![0.0f32; n * dim];
+    norms
+        .par_iter_mut()
+        .zip(unit_flat.par_chunks_mut(dim))
+        .enumerate()
+        .for_each(|(i, (norm, unit_row))| {
+            let row = &vectors[i * dim..(i + 1) * dim];
+            let n_val = simd_norm(row);
+            *norm = n_val;
+            let inv = if n_val > 1e-10 { 1.0 / n_val } else { 0.0 };
+            simd_scale(row, inv, unit_row);
+        });
+
+    let unit_mat = ArrayView2::from_shape((n, dim), &unit_flat).unwrap();
+    let rot_mat = ArrayView2::from_shape((dim, dim), rotation).unwrap();
+    let rotated_mat = unit_mat.dot(&rot_mat.t());
+    let rotated = rotated_mat.as_slice().unwrap();
+    compute_tqplus_calibration(rotated, n, dim)
+}
+
 /// Per-coordinate TQ+ calibration. For each of the `dim` rotated coordinates,
 /// computes `(shift, scale)` such that `(x + shift) * scale` maps the empirical
 /// (P_LO, P_HI) quantiles onto the canonical Beta((dim-1)/2, (dim-1)/2)
@@ -243,19 +274,19 @@ fn simd_scale(row: &[f32], scale: f32, out: &mut [f32]) {
 // ─── Fused quantize + scale + pack (aarch64) ────────────────────────────────
 
 /// Process one row: quantize calibrated rotated values against boundaries,
-/// accumulate the centroid inner product *in original (uncalibrated) space*
-/// for the scale correction, and pack the resulting codes.
+/// accumulate the centroid inner product and squared reconstruction norm
+/// *in original (uncalibrated) space* for the least-squares scale correction,
+/// and pack the resulting codes.
 ///
-/// The inner-product reconstruction undoes the calibration so the stored
-/// `scale[i] = ||v|| / <u_rot[i], x_hat_orig[i]>` matches what the search
-/// path will compute when scoring queries (which also apply the inverse
+/// The reconstruction undoes the calibration so the stored scalar matches
+/// the vector represented by the search path (which also applies the inverse
 /// calibration):
 ///
 /// ```text
 /// x_hat_orig[d] = centroids[code[d]] / scale_tq[d] - shift[d]
 /// inner        = sum_d u_rot[d] * x_hat_orig[d]
-///              = sum_d u_rot[d] * inv_scale_tq[d] * centroids[code[d]]
-///                - sum_d u_rot[d] * shift[d]
+/// recon_sq     = sum_d x_hat_orig[d]²
+/// scalar       = ||v|| * inner / recon_sq
 /// ```
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
@@ -291,6 +322,7 @@ fn fused_quantize_scale_pack(
     }
 
     let mut inner = 0.0f64;
+    let mut reconstruction_sq = 0.0f64;
     let chunks = dim / 8;
 
     unsafe {
@@ -329,6 +361,7 @@ fn fused_quantize_scale_pack(
                     (centroids[counts[k] as usize] as f64) * (inv_scale_tq[d] as f64)
                         - (shift[d] as f64);
                 inner += (rot_orig[d] as f64) * centroid_in_orig;
+                reconstruction_sq += centroid_in_orig * centroid_in_orig;
             }
 
             // Pack 8 codes into one byte per bit-plane (unchanged).
@@ -354,6 +387,7 @@ fn fused_quantize_scale_pack(
                 (centroids[code as usize] as f64) * (inv_scale_tq[j] as f64)
                     - (shift[j] as f64);
             inner += (rot_orig[j] as f64) * centroid_in_orig;
+            reconstruction_sq += centroid_in_orig * centroid_in_orig;
             let byte_pos = j / 8;
             let bit_pos = 7 - (j % 8);
             for p in 0..bits {
@@ -364,8 +398,9 @@ fn fused_quantize_scale_pack(
         }
     }
 
-    let inner = inner.max(1e-10) as f32;
-    norm / inner
+    let inner = inner.max(1e-10);
+    let reconstruction_sq = reconstruction_sq.max(1e-10);
+    (norm as f64 * inner / reconstruction_sq) as f32
 }
 
 // ─── Fused quantize + scale + pack (fallback) ───────────────────────────────
@@ -430,6 +465,7 @@ fn fused_quantize_scale_pack_scalar_body(
     bytes_per_plane: usize,
 ) -> f32 {
     let mut inner = 0.0f64;
+    let mut reconstruction_sq = 0.0f64;
 
     for j in 0..dim {
         let code = quantize_code(rot_calib[j], boundaries);
@@ -437,6 +473,7 @@ fn fused_quantize_scale_pack_scalar_body(
             (centroids[code as usize] as f64) * (inv_scale_tq[j] as f64)
                 - (shift[j] as f64);
         inner += (rot_orig[j] as f64) * centroid_in_orig;
+        reconstruction_sq += centroid_in_orig * centroid_in_orig;
 
         let byte_pos = j / 8;
         let bit_pos = 7 - (j % 8);
@@ -447,6 +484,7 @@ fn fused_quantize_scale_pack_scalar_body(
         }
     }
 
-    let inner = inner.max(1e-10) as f32;
-    norm / inner
+    let inner = inner.max(1e-10);
+    let reconstruction_sq = reconstruction_sq.max(1e-10);
+    (norm as f64 * inner / reconstruction_sq) as f32
 }

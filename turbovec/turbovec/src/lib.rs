@@ -249,6 +249,41 @@ impl TurboQuantIndex {
         })
     }
 
+    /// Fit the per-coordinate TQ+ calibration from a representative sample
+    /// without adding that sample to the index. This is useful for bounded,
+    /// chunked ingestion where the first physical chunk may not represent the
+    /// full source distribution.
+    ///
+    /// The sample is used only during index construction. Search continues to
+    /// use the persisted bit-width payload, scales, and calibration metadata;
+    /// it never needs the source FP32 vectors.
+    pub fn prepare_calibration(&mut self, sample: &[f32]) {
+        let dim = self.dim.expect(
+            "TurboQuantIndex dim is not set; construct via TurboQuantIndex::new before preparing calibration",
+        );
+        let n = sample.len() / dim;
+        assert_eq!(sample.len(), n * dim, "calibration sample length must be a multiple of dim");
+        assert!(n > 0, "calibration sample must not be empty");
+        if let Some((vi, ci, v)) = first_invalid_coord(sample, dim) {
+            panic!(
+                "invalid calibration sample value at vector {vi}, coord {ci}: {v} \
+                 (must be finite and |value| < 1e16 to avoid f32 norm overflow)",
+            );
+        }
+
+        let rotation = self
+            .rotation
+            .get_or_init(|| Arc::new(rotation::make_rotation_matrix(dim)));
+        if self.boundaries.get().is_none() || self.centroids.get().is_none() {
+            let (boundaries, centroids) = codebook::codebook(self.bit_width, dim);
+            let _ = self.boundaries.set(boundaries);
+            let _ = self.centroids.set(Arc::new(centroids));
+        }
+        let (shift, scale) = encode::fit_calibration(sample, n, dim, rotation);
+        self.tqplus_shift = shift;
+        self.tqplus_scale = scale;
+    }
+
     /// Add a flat batch of vectors. `dim` must be set (either eagerly at
     /// construction or by a prior [`Self::add_2d`] call).
     ///
@@ -634,6 +669,65 @@ impl TurboQuantIndex {
                 pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
             BlockedCache { data, n_blocks }
         });
+    }
+
+    /// Prepare one query for repeated sparse same-bit candidate scoring.
+    /// HNSW uses this when graph traversal returns many small payload blocks;
+    /// the query rotation, calibration, and lookup table are built once.
+    pub fn prepare_query_with_cache(
+        &self,
+        query: &[f32],
+        cache: &SearchCache,
+    ) -> search::PreparedQuery {
+        let Some(dim) = self.dim else {
+            panic!("cannot prepare a query for an empty lazy index");
+        };
+        assert_eq!(query.len(), dim);
+        if let Some((vi, ci, v)) = first_invalid_coord(query, dim) {
+            panic!(
+                "invalid query value at query {vi}, coord {ci}: {v} \
+                 (must be finite and |value| < 1e16 to avoid f32 overflow)",
+            );
+        }
+        let rotation = self
+            .rotation
+            .get_or_init(|| Arc::clone(&cache.rotation));
+        let centroids = self
+            .centroids
+            .get_or_init(|| Arc::clone(&cache.centroids));
+        search::prepare_query_one(
+            query,
+            rotation,
+            centroids,
+            &self.tqplus_shift,
+            &self.tqplus_scale,
+            self.bit_width,
+            dim,
+        )
+    }
+
+    /// Score selected local ids using a prepared query and this index's own
+    /// persisted payload. The result order matches `ids`.
+    pub fn score_ids(
+        &self,
+        prepared: &search::PreparedQuery,
+        ids: &[usize],
+    ) -> Vec<f32> {
+        let Some(dim) = self.dim else { return Vec::new() };
+        let blocked = self.blocked.get_or_init(|| {
+            let (data, n_blocks) =
+                pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
+            BlockedCache { data, n_blocks }
+        });
+        search::score_ids_one(
+            prepared,
+            &blocked.data,
+            &self.scales,
+            self.bit_width,
+            dim,
+            self.n_vectors,
+            ids,
+        )
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
