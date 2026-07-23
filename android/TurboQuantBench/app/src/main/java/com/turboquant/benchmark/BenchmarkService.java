@@ -31,11 +31,12 @@ public class BenchmarkService extends Service {
 
     private static final String CHANNEL_ID = "turboquant_benchmarks";
     private static final int NOTIFICATION_ID = 4201;
-    // Invalidate the previous reports when search semantics change: Flat B
-    // now exact-reranks 4-bit candidates, and HNSW uses the recall-tuned
-    // efSearch value reported by the native benchmark.
-    private static final String FLAT_CACHE_VERSION = "v5";
-    private static final String HNSW_CACHE_VERSION = "v4";
+    // Invalidate the previous reports when search semantics change: Flat
+    // quantized rows now finalize candidates using only their own persisted
+    // bit-width representation; no raw FP32 rerank is part of Flat A/B.
+    private static final String FLAT_CACHE_VERSION = "v11";
+    private static final String FLAT_QUERY_CACHE_VERSION = "v13";
+    private static final String HNSW_CACHE_VERSION = "v6";
     private static final String LAST_MODE_PREFS = "benchmark_cache_state";
     private static final String LAST_MODE_KEY = "last_mode";
     private static final Object LOCK = new Object();
@@ -181,7 +182,14 @@ public class BenchmarkService extends Service {
     }
 
     private static File cacheFile(Context context, String mode) {
-        String version = isHnswMode(mode) ? HNSW_CACHE_VERSION : FLAT_CACHE_VERSION;
+        String version;
+        if (isHnswMode(mode)) {
+            version = HNSW_CACHE_VERSION;
+        } else if (MODE_QUERY_MAJOR.equals(mode)) {
+            version = FLAT_QUERY_CACHE_VERSION;
+        } else {
+            version = FLAT_CACHE_VERSION;
+        }
         return new File(context.getFilesDir(), "benchmark_" + mode + "_" + version + ".json");
     }
 

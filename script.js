@@ -20,58 +20,58 @@ function benchRow(dataset, bits, selfR1, selfR10, randomR10, msQuery, rom, vecto
 const androidBenchTables = [
   {
     title: "FlatIndex — A) real traffic / query-major",
-    note: "1 timed query worker; 8 Rayon workers for recall/truth and preparation. One-time build: 50K FP32 0.0, FP16 80.4, 8-bit 1,922.6, 4-bit 943.4 ms; 100K FP32 0.0, FP16 175.2, 8-bit 2,361.3, 4-bit 2,486.6 ms.",
+    note: "1 timed query worker; 8 Rayon workers for recall/truth and preparation. One-time build: 50K FP32 0.0, FP16 78.0, 8-bit 1,237.2, 4-bit 1,154.4 ms; 100K FP32 0.0, FP16 170.9, 8-bit 2,461.6, 4-bit 3,112.6 ms.",
     rows: [
-      benchRow("Cohere 50K", 32, "100.00%", "100.00%", "100.00%", 35.061, "146.5 MB", "29.0 MB raw FP32 chunk", "30.0 MB"),
-      benchRow("Cohere 50K", 16, "100.00%", "99.89%", "99.64%", 136.253, "73.2 MB", "28.9 MB raw FP16 + fused dot", "30.0 MB"),
-      benchRow("Cohere 50K", 8, "100.00%", "99.99%", "100.00%", 46.551, "36.8 MB", "28.9 MB blocked 8-bit range", "30.0 MB"),
-      benchRow("Cohere 50K", 4, "100.00%", "99.99%", "100.00%", 19.153, "18.5 MB", "28.9 MB blocked 4-bit range", "30.0 MB"),
-      benchRow("Cohere 100K", 32, "100.00%", "100.00%", "100.00%", 73.689, "293.0 MB", "49.0 MB raw FP32 chunk", "50.0 MB"),
-      benchRow("Cohere 100K", 16, "100.00%", "99.74%", "99.73%", 161.029, "146.5 MB", "48.9 MB raw FP16 + fused dot", "50.0 MB"),
-      benchRow("Cohere 100K", 8, "100.00%", "100.00%", "100.00%", 119.751, "73.6 MB", "48.9 MB blocked 8-bit range", "50.0 MB"),
-      benchRow("Cohere 100K", 4, "100.00%", "100.00%", "100.00%", 54.799, "37.0 MB", "48.9 MB blocked 4-bit range", "50.0 MB")
+      benchRow("Cohere 50K", 32, "100.00%", "100.00%", "100.00%", 33.604, "146.5 MB", "29.0 MB raw FP32 chunk", "30.0 MB"),
+      benchRow("Cohere 50K", 16, "100.00%", "99.88%", "99.64%", 21.381, "73.2 MB", "28.9 MB raw FP16 + fused dot", "30.0 MB"),
+      benchRow("Cohere 50K", 8, "100.00%", "99.10%", "98.54%", 30.123, "36.8 MB", "28.9 MB blocked 8-bit range", "30.0 MB"),
+      benchRow("Cohere 50K", 4, "100.00%", "93.04%", "90.00%", 16.210, "18.5 MB", "28.9 MB blocked 4-bit range", "30.0 MB"),
+      benchRow("Cohere 100K", 32, "100.00%", "100.00%", "100.00%", 68.712, "293.0 MB", "49.0 MB raw FP32 chunk", "50.0 MB"),
+      benchRow("Cohere 100K", 16, "100.00%", "99.74%", "99.73%", 45.118, "146.5 MB", "48.9 MB raw FP16 + fused dot", "50.0 MB"),
+      benchRow("Cohere 100K", 8, "100.00%", "99.31%", "98.77%", 85.440, "73.6 MB", "48.9 MB blocked 8-bit range", "50.0 MB"),
+      benchRow("Cohere 100K", 4, "100.00%", "93.46%", "90.32%", 70.775, "37.0 MB", "48.9 MB blocked 4-bit range", "50.0 MB")
     ]
   },
   {
     title: "FlatIndex — B) batched throughput",
-    note: "8 Rayon workers in the timed range-major batch. Each bounded chunk/range is reused across 2,000 queries. One-time build: 50K FP32 0.0, FP16 90.8, 8-bit 1,253.9, 4-bit 1,031.2 ms; 100K FP32 0.0, FP16 213.5, 8-bit 2,802.8, 4-bit 3,653.1 ms.",
+    note: "8 Rayon workers in the timed range-major batch. Each bounded chunk/range is reused across 2,000 queries. One-time build: 50K FP32 0.0, FP16 87.1, 8-bit 1,300.7, 4-bit 1,183.4 ms; 100K FP32 0.0, FP16 191.8, 8-bit 2,857.8, 4-bit 4,512.1 ms. This is the last B report pulled before final B-only source edits; rerun B on a connected S25 for updated latency.",
     rows: [
-      benchRow("Cohere 50K", 32, "100.00%", "100.00%", "100.00%", 1.318, "146.5 MB", "23.1 MB raw FP32 chunk", "30.0 MB"),
-      benchRow("Cohere 50K", 16, "100.00%", "99.89%", "99.64%", 1.324, "73.2 MB", "23.1 MB decoded FP32 chunk", "30.0 MB"),
-      benchRow("Cohere 50K", 8, "100.00%", "99.14%", "98.65%", 4.705, "36.8 MB", "22.7 MB blocked 8-bit range", "30.0 MB"),
-      benchRow("Cohere 50K", 4, "100.00%", "99.99%", "100.00%", 0.651, "18.5 MB", "21.9 MB blocked 4-bit range", "30.0 MB"),
-      benchRow("Cohere 100K", 32, "100.00%", "100.00%", "100.00%", 3.343, "293.0 MB", "43.1 MB raw FP32 chunk", "50.0 MB"),
-      benchRow("Cohere 100K", 16, "100.00%", "99.74%", "99.73%", 3.461, "146.5 MB", "43.1 MB decoded FP32 chunk", "50.0 MB"),
-      benchRow("Cohere 100K", 8, "100.00%", "99.16%", "98.63%", 12.820, "73.6 MB", "42.7 MB blocked 8-bit range", "50.0 MB"),
-      benchRow("Cohere 100K", 4, "100.00%", "100.00%", "100.00%", 1.369, "37.0 MB", "41.9 MB blocked 4-bit range", "50.0 MB")
+      benchRow("Cohere 50K", 32, "100.00%", "100.00%", "100.00%", 0.587, "146.5 MB", "23.1 MB raw FP32 chunk", "30.0 MB"),
+      benchRow("Cohere 50K", 16, "100.00%", "99.88%", "99.64%", 1.330, "73.2 MB", "23.1 MB raw FP16 chunk", "30.0 MB"),
+      benchRow("Cohere 50K", 8, "100.00%", "99.10%", "98.54%", 4.727, "36.8 MB", "22.7 MB blocked 8-bit range", "30.0 MB"),
+      benchRow("Cohere 50K", 4, "100.00%", "93.04%", "90.00%", 0.381, "18.5 MB", "21.9 MB blocked 4-bit range", "30.0 MB"),
+      benchRow("Cohere 100K", 32, "100.00%", "100.00%", "100.00%", 1.294, "293.0 MB", "43.1 MB raw FP32 chunk", "50.0 MB"),
+      benchRow("Cohere 100K", 16, "100.00%", "99.74%", "99.73%", 3.363, "146.5 MB", "43.1 MB raw FP16 chunk", "50.0 MB"),
+      benchRow("Cohere 100K", 8, "100.00%", "99.31%", "98.77%", 11.400, "73.6 MB", "42.7 MB blocked 8-bit range", "50.0 MB"),
+      benchRow("Cohere 100K", 4, "100.00%", "93.46%", "90.32%", 1.383, "37.0 MB", "41.9 MB blocked 4-bit range", "50.0 MB")
     ]
   },
   {
     title: "HNSW — A) real traffic / query-major",
-    note: "1 timed query worker; 8 Rayon workers for recall/truth and preparation. M=16, efConstruction=128, efSearch=1024, max layers=8, base degree ≤32. Compact graph resident; payload vectors disk-backed. Graph build was a persistent-cache hit.",
+    note: "1 timed query worker; 8 Rayon workers for recall/truth and preparation. M=16, efConstruction=128, efSearch=1024, max layers=8, base degree ≤32. Compact graph resident; payload vectors disk-backed. Graph build was a persistent-cache hit. Quantized rows use same-bit finalization only; no raw-FP32 cross-bit rerank.",
     rows: [
-      benchRow("Cohere 50K", 32, "99.90%", "99.75%", "98.99%", 70.392, "227.4 MB", "6.0 MB FP16 navigation cache + FP32 candidate scratch", "≤30.0 MB"),
-      benchRow("Cohere 50K", 16, "99.90%", "99.65%", "98.65%", 67.577, "80.9 MB", "6.0 MB FP16 navigation cache", "≤30.0 MB"),
-      benchRow("Cohere 50K", 8, "99.90%", "99.75%", "98.99%", 292.741, "154.6 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤30.0 MB"),
-      benchRow("Cohere 50K", 4, "99.90%", "99.75%", "98.99%", 265.853, "117.9 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤30.0 MB"),
-      benchRow("Cohere 100K", 32, "99.30%", "99.50%", "98.42%", 80.161, "454.8 MB", "6.0 MB FP16 navigation cache + FP32 candidate scratch", "≤50.0 MB"),
-      benchRow("Cohere 100K", 16, "99.30%", "99.25%", "98.22%", 73.792, "161.9 MB", "6.0 MB FP16 navigation cache", "≤50.0 MB"),
-      benchRow("Cohere 100K", 8, "99.30%", "99.50%", "98.42%", 285.574, "309.1 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤50.0 MB"),
-      benchRow("Cohere 100K", 4, "99.30%", "99.50%", "98.42%", 303.364, "235.9 MB", "6.0 MB cache + compressed block + FP32 scratch", "≤50.0 MB")
+      benchRow("Cohere 50K", 32, "99.90%", "99.75%", "98.99%", 41.544, "227.4 MB", "6.0 MB FP16 navigation cache + FP32 candidate scratch", "≤30.0 MB"),
+      benchRow("Cohere 50K", 16, "99.90%", "99.65%", "98.65%", 39.506, "80.9 MB", "6.0 MB FP16 navigation cache", "≤30.0 MB"),
+      benchRow("Cohere 50K", 8, "99.90%", "98.89%", "97.67%", 56.208, "154.6 MB", "6.0 MB cache + compressed block", "≤30.0 MB"),
+      benchRow("Cohere 50K", 4, "99.90%", "92.94%", "89.50%", 53.324, "117.9 MB", "6.0 MB cache + compressed block", "≤30.0 MB"),
+      benchRow("Cohere 100K", 32, "99.30%", "99.50%", "98.42%", 49.873, "454.8 MB", "6.0 MB FP16 navigation cache + FP32 candidate scratch", "≤50.0 MB"),
+      benchRow("Cohere 100K", 16, "99.30%", "99.25%", "98.22%", 48.026, "161.9 MB", "6.0 MB FP16 navigation cache", "≤50.0 MB"),
+      benchRow("Cohere 100K", 8, "99.30%", "98.85%", "97.39%", 67.199, "309.1 MB", "6.0 MB cache + compressed block", "≤50.0 MB"),
+      benchRow("Cohere 100K", 4, "99.30%", "93.21%", "89.51%", 63.597, "235.9 MB", "6.0 MB cache + compressed block", "≤50.0 MB")
     ]
   },
   {
     title: "HNSW — B) batched throughput",
-    note: "8 Rayon workers in the timed graph-search batch; each worker has a bounded 256-vector FP16 candidate cache. M=16, efConstruction=128, efSearch=1024, max layers=8, base degree ≤32. Graph build is one-time and excluded.",
+    note: "8 Rayon workers in the timed graph-search batch; each worker has a bounded 256-vector FP16 candidate cache. M=16, efConstruction=128, efSearch=1024, max layers=8, base degree ≤32. Graph build is one-time and excluded. Quantized rows use same-bit finalization only; no raw-FP32 cross-bit rerank.",
     rows: [
-      benchRow("Cohere 50K", 32, "99.90%", "99.75%", "98.99%", 16.848, "227.4 MB", "384 KB FP16 candidates/worker + FP32 scratch", "≤30.0 MB"),
-      benchRow("Cohere 50K", 16, "99.90%", "99.65%", "98.65%", 6.948, "80.9 MB", "384 KB FP16 candidates/worker", "≤30.0 MB"),
-      benchRow("Cohere 50K", 8, "99.90%", "99.75%", "98.99%", 72.618, "154.6 MB", "384 KB cache + compressed block + FP32 scratch", "≤30.0 MB"),
-      benchRow("Cohere 50K", 4, "99.90%", "99.75%", "98.99%", 64.260, "117.9 MB", "384 KB cache + compressed block + FP32 scratch", "≤30.0 MB"),
-      benchRow("Cohere 100K", 32, "99.30%", "99.50%", "98.42%", 20.054, "454.8 MB", "384 KB FP16 candidates/worker + FP32 scratch", "≤50.0 MB"),
-      benchRow("Cohere 100K", 16, "99.30%", "99.25%", "98.22%", 18.967, "161.9 MB", "384 KB FP16 candidates/worker", "≤50.0 MB"),
-      benchRow("Cohere 100K", 8, "99.30%", "99.50%", "98.42%", 83.506, "309.1 MB", "384 KB cache + compressed block + FP32 scratch", "≤50.0 MB"),
-      benchRow("Cohere 100K", 4, "99.30%", "99.50%", "98.42%", 75.411, "235.9 MB", "384 KB cache + compressed block + FP32 scratch", "≤50.0 MB")
+      benchRow("Cohere 50K", 32, "99.90%", "99.75%", "98.99%", 6.054, "227.4 MB", "384 KB FP16 candidates/worker + FP32 scratch", "≤30.0 MB"),
+      benchRow("Cohere 50K", 16, "99.90%", "99.65%", "98.65%", 5.411, "80.9 MB", "384 KB FP16 candidates/worker", "≤30.0 MB"),
+      benchRow("Cohere 50K", 8, "99.90%", "98.89%", "97.67%", 8.849, "154.6 MB", "384 KB cache + compressed block", "≤30.0 MB"),
+      benchRow("Cohere 50K", 4, "99.90%", "92.94%", "89.50%", 12.448, "117.9 MB", "384 KB cache + compressed block", "≤30.0 MB"),
+      benchRow("Cohere 100K", 32, "99.30%", "99.50%", "98.42%", 11.969, "454.8 MB", "384 KB FP16 candidates/worker + FP32 scratch", "≤50.0 MB"),
+      benchRow("Cohere 100K", 16, "99.30%", "99.25%", "98.22%", 8.446, "161.9 MB", "384 KB FP16 candidates/worker", "≤50.0 MB"),
+      benchRow("Cohere 100K", 8, "99.30%", "98.85%", "97.39%", 16.042, "309.1 MB", "384 KB cache + compressed block", "≤50.0 MB"),
+      benchRow("Cohere 100K", 4, "99.30%", "93.21%", "89.51%", 15.200, "235.9 MB", "384 KB cache + compressed block", "≤50.0 MB")
     ]
   }
 ];
@@ -308,7 +308,7 @@ function renderAndroidBench() {
       <article class="bench-table-wrap">
         <div class="panel-head">
           <h3>${table.title}</h3>
-          <span>recall floor &gt; 98%</span>
+          <span>same-bit contract; 98% target</span>
         </div>
         <p class="section-note">${table.note}</p>
         <div class="table-scroll">

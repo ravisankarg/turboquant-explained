@@ -28,6 +28,17 @@ const SIMD_BLOCK: usize = 32;
 const TIMED_PROBES_PER_SET: usize = 8;
 const QUERY_MAJOR_QUERY_BYTES: usize = DIM * std::mem::size_of::<f32>();
 const QUANT_RERANK_CANDIDATES: usize = 256;
+const QUANT_8BIT_QUERY_MAJOR_CANDIDATES: usize = 128;
+const QUANT_CALIBRATION_SAMPLE: usize = 4096;
+
+#[inline]
+fn quant_query_major_rerank_candidates(bit_width: usize) -> usize {
+    if bit_width == 8 {
+        QUANT_8BIT_QUERY_MAJOR_CANDIDATES
+    } else {
+        QUANT_RERANK_CANDIDATES
+    }
+}
 
 // HNSW is deliberately a compact, disk-backed family in this benchmark. The
 // graph is built over the persisted FP16 store, then written as flat u32
@@ -400,18 +411,18 @@ fn run_mode(
                 human_bytes(cap_100k as u64)
             ),
             if mode.is_hnsw() {
-                "HNSW keeps every payload store on disk. One shared FP16 navigation graph selects candidates; FP32/FP16 score candidates from their disk-backed payload, while 8/4-bit score compressed candidates and exact-rerank the bounded candidate set with raw FP32 reads. The graph build's temporary full FP16 staging is not part of steady-state search RAM.".to_string()
+                "HNSW keeps every payload store on disk. One shared FP16 navigation graph selects candidates; FP32/FP16 score candidates from their own disk-backed payload, while 8/4-bit finalize candidates using only their own persisted compressed payload. No cross-bit payload or raw-FP32 rerank is used for 8/4. The graph build's temporary full FP16 staging is not part of steady-state search RAM.".to_string()
             } else {
                 "All methods are disk-backed: FP32 loads bounded raw f32 chunks, FP16 loads bounded raw f16 bits and converts during the dot product, while TurboQuant loads one persisted compressed range plus its blocked SIMD copy and search caches.".to_string()
             },
             if mode == BenchmarkMode::QueryMajor {
                 format!(
-                    "FlatIndex A 8-bit and 4-bit rows expand each compressed range to up to {} approximate candidates, then exact-rerank those candidate ids from the disk-backed raw FP32 store; the bounded candidate heap is not a resident copy of the database.",
+                    "FlatIndex A 8-bit and 4-bit rows expand each compressed range to up to {} quantized-score candidates, merge them across ranges, and finalize top-10 using only that bit-width's persisted representation; no raw FP32 payload is read during search.",
                     QUANT_RERANK_CANDIDATES
                 )
             } else if mode == BenchmarkMode::Batched {
                 format!(
-                    "FlatIndex B uses direct range-major scoring for FP32/FP16/8-bit. The 4-bit row also expands each range to up to {} candidates and exact-reranks them from the disk-backed raw FP32 store so its displayed R@10 is not the raw 4-bit top-10.",
+                    "FlatIndex B uses direct range-major scoring for FP32/FP16/8-bit. The 4-bit row also expands each range to up to {} candidates and merges only 4-bit scores; no raw FP32 payload is read during search.",
                     QUANT_RERANK_CANDIDATES
                 )
             } else {
@@ -469,7 +480,7 @@ fn run_mode(
             if mode.is_hnsw() {
                 "HNSW build parameters are chosen for the recall target: M=16, efConstruction=128, efSearch=1024. The higher efSearch expands more graph candidates and therefore trades some HNSW latency for roughly 98% random R@10.".to_string()
             } else {
-                "FlatIndex FP32 scans the raw f32 database, FlatIndex FP16 scans a persisted IEEE FP16 copy with fused half-to-f32 conversion during scoring, and FlatIndex 8-bit/4-bit use TurboQuant compressed flat scans.".to_string()
+                "FlatIndex FP32 scans the raw f32 database; FlatIndex A FP16 scans persisted IEEE FP16 bits with AArch64 FP16-to-FP32 conversion and NEON dot products during scoring; FlatIndex B retains its separate range-major path. FlatIndex 8-bit/4-bit use TurboQuant compressed flat scans.".to_string()
             },
             if mode.is_hnsw() {
                 "Graph adjacency is resident; vector payloads remain disk-backed. The candidate cache is an optimization, not a resident copy of the 50K/100K database.".to_string()
@@ -772,7 +783,6 @@ fn bench_dataset_hnsw_query_major(
         let mut searcher = HnswQuantSearcher::open(
             &fp16_path,
             &blocked_index_path(output_dir, &dataset.id, bit_width),
-            vector_path,
             &graph,
             dataset.vectors,
             bit_width,
@@ -797,11 +807,11 @@ fn bench_dataset_hnsw_query_major(
             graph_write_ms + quant_write_ms,
             graph.resident_bytes() as u64 + fp16_bytes + quant_rom,
             &format!(
-                "disk-backed {}-bit payload + shared FP16 navigation graph + exact FP32 rerank",
+                "disk-backed {}-bit payload + shared FP16 navigation graph; same-bit final scoring",
                 bit_width
             ),
             &format!(
-                "{} FP16 navigation cache + one compressed block + FP32 scratch",
+                "{} FP16 navigation cache + one compressed block",
                 human_bytes((HNSW_VECTOR_CACHE_VECTORS * DIM * 2) as u64)
             ),
         ));
@@ -1072,7 +1082,6 @@ fn bench_dataset_hnsw_batched(
             HnswQuantSearcher::open(
                 &fp16_path,
                 &quant_path,
-                vector_path,
                 &graph,
                 dataset.vectors,
                 bit_width,
@@ -1087,7 +1096,6 @@ fn bench_dataset_hnsw_batched(
             HnswQuantSearcher::open(
                 &fp16_path,
                 &quant_path,
-                vector_path,
                 &graph,
                 dataset.vectors,
                 bit_width,
@@ -1111,11 +1119,11 @@ fn bench_dataset_hnsw_batched(
             timed_q,
             graph.resident_bytes() as u64 + fp16_bytes + quant_rom,
             &format!(
-                "disk-backed {}-bit payload + shared FP16 navigation graph + exact FP32 rerank",
+                "disk-backed {}-bit payload + shared FP16 navigation graph; same-bit final scoring",
                 bit_width
             ),
             &format!(
-                "{} FP16 candidates per worker + one compressed block + FP32 scratch",
+                "{} FP16 candidates per worker + one compressed block",
                 human_bytes((HNSW_BATCH_VECTOR_CACHE_VECTORS * DIM * 2) as u64)
             ),
         ));
@@ -1202,6 +1210,9 @@ fn ensure_quant_store(
 
     let index_start = Instant::now();
     let mut index = TurboQuantIndex::new(DIM, bit_width).map_err(|e| format!("{e:?}"))?;
+    let calibration_sample = load_quant_calibration_sample(vector_path, n)?;
+    index.prepare_calibration(&calibration_sample);
+    drop(calibration_sample);
     for_each_vector_chunk(vector_path, n, cap, |_, chunk| {
         index.add(&chunk);
         Ok(())
@@ -1985,7 +1996,6 @@ impl HnswMethodSearch for HnswRawSearcher<'_> {
 struct HnswQuantSearcher<'a> {
     navigation: HnswSearcher<'a>,
     quant_reader: BufReader<File>,
-    raw_file: File,
     n: usize,
     bit_width: usize,
     search_cache: SearchCache,
@@ -1995,7 +2005,6 @@ impl<'a> HnswQuantSearcher<'a> {
     fn open(
         navigation_path: &Path,
         quant_path: &Path,
-        raw_path: &Path,
         graph: &'a HnswGraph,
         n: usize,
         bit_width: usize,
@@ -2008,8 +2017,6 @@ impl<'a> HnswQuantSearcher<'a> {
                 File::open(quant_path)
                     .map_err(|e| format!("open HNSW quant store {}: {e}", quant_path.display()))?,
             ),
-            raw_file: File::open(raw_path)
-                .map_err(|e| format!("open HNSW raw FP32 store {}: {e}", raw_path.display()))?,
             n,
             bit_width,
             search_cache,
@@ -2036,10 +2043,10 @@ impl HnswMethodSearch for HnswQuantSearcher<'_> {
             &candidates,
             &self.search_cache,
         )?;
-        // The graph/quantized stage narrows the candidate set; exact FP32
-        // scoring gives the displayed HNSW 8/4-bit rows the same recall
-        // contract as FlatIndex A without resident raw-vector storage.
-        rerank_exact_candidates_from_file(&self.raw_file, query, &quant_hits)
+        // The graph narrows the candidate set; the displayed 8/4-bit result
+        // is finalized strictly from that method's own persisted payload.
+        // There is intentionally no raw-FP32 cross-bit rerank here.
+        Ok(finalize_candidate_heap(quant_hits))
     }
 }
 
@@ -2058,6 +2065,7 @@ fn quant_score_candidate_ids(
     sorted.sort_unstable();
     sorted.dedup();
     let mut hits = Vec::with_capacity(sorted.len());
+    let mut prepared_query = None;
     let mut cursor = 0usize;
     while cursor < sorted.len() {
         let block_base = (sorted[cursor] / SIMD_BLOCK) * SIMD_BLOCK;
@@ -2069,18 +2077,17 @@ fn quant_score_candidate_ids(
         let index = TurboQuantIndex::load_blocked_range_from_reader(reader, block_base, take)
             .map_err(|e| format!("load HNSW quant block [{}..{}]: {e}", block_base, block_base + take))?;
         index.prepare_with_cache(search_cache);
-        let results = index.search_one(query, take);
-        for rank in 0..results.k {
-            let local = results.indices[rank];
-            if local < 0 {
-                continue;
-            }
-            let global = block_base + local as usize;
-            if sorted[group_start..cursor].binary_search(&global).is_ok() {
-                hits.push(Hit {
-                    score: results.scores[rank],
-                    idx: global,
-                });
+        if prepared_query.is_none() {
+            prepared_query = Some(index.prepare_query_with_cache(query, search_cache));
+        }
+        let local_ids: Vec<usize> = sorted[group_start..cursor]
+            .iter()
+            .map(|&global| global - block_base)
+            .collect();
+        let scores = index.score_ids(prepared_query.as_ref().unwrap(), &local_ids);
+        for (&global, &score) in sorted[group_start..cursor].iter().zip(scores.iter()) {
+            if score.is_finite() {
+                hits.push(Hit { score, idx: global });
             }
         }
     }
@@ -2495,6 +2502,23 @@ fn validate_vector_file(path: &Path, n: usize) -> Result<(), String> {
     Ok(())
 }
 
+fn load_quant_calibration_sample(path: &Path, n: usize) -> Result<Vec<f32>, String> {
+    let sample_n = n.min(QUANT_CALIBRATION_SAMPLE).max(1);
+    let mut file = File::open(path)
+        .map_err(|e| format!("open calibration source {}: {e}", path.display()))?;
+    let mut sample = vec![0.0f32; sample_n * DIM];
+    for sample_idx in 0..sample_n {
+        let vector_idx = (sample_idx * n / sample_n).min(n.saturating_sub(1));
+        read_f32_vectors_at(
+            &file,
+            vector_idx,
+            1,
+            &mut sample[sample_idx * DIM..(sample_idx + 1) * DIM],
+        )?;
+    }
+    Ok(sample)
+}
+
 fn vector_ram_cap_bytes(n_vectors: usize) -> usize {
     if n_vectors <= 50_000 {
         VECTOR_RAM_CAP_50K_BYTES
@@ -2517,6 +2541,16 @@ fn raw_chunk_vectors(cap: usize) -> usize {
 
 fn raw_chunk_vectors_query_major(cap: usize) -> usize {
     raw_chunk_vectors_with_reserve(cap, QUERY_MAJOR_QUERY_BYTES)
+}
+
+fn fp16_chunk_vectors_batched(cap: usize) -> usize {
+    let fixed = query_vector_bytes()
+        .saturating_add(READ_BUFFER_BYTES)
+        .saturating_add(64 * 1024);
+    cap.saturating_sub(fixed)
+        .checked_div(DIM * std::mem::size_of::<u16>())
+        .unwrap_or(0)
+        .max(1)
 }
 
 fn fp16_chunk_vectors_query_major(cap: usize) -> usize {
@@ -3392,6 +3426,46 @@ fn dot_fp16(query: &[f32], values: &[u16]) -> f32 {
     a0 + a1 + a2 + a3
 }
 
+// FlatIndex A is a one-query dense scan, so it uses the S25's native FP16
+// conversion instructions while keeping the persisted FP16 chunk disk-backed.
+// The scalar dot_fp16() loop remains in use by HNSW's navigation path; this
+// specialized kernel changes only FlatIndex A.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "fp16")]
+#[inline]
+unsafe fn dot_fp16_flat_neon(query: &[f32], values: &[u16]) -> f32 {
+    use std::arch::aarch64::{
+        vaddq_f32, vaddvq_f32, vcvt_f32_f16, vdupq_n_f32, vld1_u16, vld1q_f32,
+        vmlaq_f32, vreinterpret_f16_u16,
+    };
+
+    debug_assert_eq!(query.len(), DIM);
+    debug_assert_eq!(values.len(), DIM);
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut i = 0usize;
+    while i + 16 <= DIM {
+        let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(values.as_ptr().add(i))));
+        let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(values.as_ptr().add(i + 4))));
+        let v2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(values.as_ptr().add(i + 8))));
+        let v3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(values.as_ptr().add(i + 12))));
+        acc0 = vmlaq_f32(acc0, vld1q_f32(query.as_ptr().add(i)), v0);
+        acc1 = vmlaq_f32(acc1, vld1q_f32(query.as_ptr().add(i + 4)), v1);
+        acc2 = vmlaq_f32(acc2, vld1q_f32(query.as_ptr().add(i + 8)), v2);
+        acc3 = vmlaq_f32(acc3, vld1q_f32(query.as_ptr().add(i + 12)), v3);
+        i += 16;
+    }
+    vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+fn dot_fp16_flat_neon(query: &[f32], values: &[u16]) -> f32 {
+    dot_fp16(query, values)
+}
+
 #[inline(always)]
 fn dot_fp16_values(a: &[u16], b: &[u16]) -> f32 {
     debug_assert_eq!(a.len(), DIM);
@@ -3650,7 +3724,7 @@ fn flat_fp16_topk_file_query_major(
                 insert_hit(
                     &mut heap,
                     Hit {
-                        score: dot_fp16(q, v),
+                        score: unsafe { dot_fp16_flat_neon(q, v) },
                         idx: base + local_idx,
                     },
                 );
@@ -3676,25 +3750,30 @@ fn flat_fp16_topk_file_batched(
         }; K];
         nq
     ];
-    let per_chunk = raw_chunk_vectors(vector_ram_cap);
+    // Keep the B path in the persisted FP16 representation. Decoding every
+    // active range to f32 and then using the FP32 dot kernel made FP16 slower
+    // than raw FP32 and overstated its vector staging footprint.
+    let per_chunk = fp16_chunk_vectors_batched(vector_ram_cap);
     let mut reader = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut chunk = vec![0u16; per_chunk * DIM];
     let mut base = 0usize;
     while base < n {
         let take = (n - base).min(per_chunk);
-        let chunk = load_fp16_range_from_reader(
+        let values = take * DIM;
+        load_fp16_bits_range_into_reader(
             &mut reader,
             base * DIM * 2,
             take * DIM * 2,
-            take * DIM,
+            &mut chunk[..values],
             path,
         )?;
         heaps.par_iter_mut().enumerate().for_each(|(qi, heap)| {
             let q = &queries[qi * DIM..(qi + 1) * DIM];
-            for (local_idx, v) in chunk.chunks_exact(DIM).enumerate() {
+            for (local_idx, v) in chunk[..values].chunks_exact(DIM).enumerate() {
                 insert_hit(
                     heap,
                     Hit {
-                        score: dot(q, v),
+                        score: unsafe { dot_fp16_flat_neon(q, v) },
                         idx: base + local_idx,
                     },
                 );
@@ -3745,6 +3824,9 @@ fn bench_quant_query_major(
 ) -> Result<Row, String> {
     let index_start = Instant::now();
     let mut index = TurboQuantIndex::new(DIM, bit_width).map_err(|e| format!("{e:?}"))?;
+    let calibration_sample = load_quant_calibration_sample(vector_path, dataset.vectors)?;
+    index.prepare_calibration(&calibration_sample);
+    drop(calibration_sample);
     for_each_vector_chunk(vector_path, dataset.vectors, vector_ram_cap, |_, chunk| {
         index.add(&chunk);
         Ok(())
@@ -3768,25 +3850,25 @@ fn bench_quant_query_major(
     let search_cache = SearchCache::new(DIM, bit_width);
     let shared_cache_ms = cache_start.elapsed().as_secs_f64() * 1000.0;
     let (self_results, random_results, _batch_prepare_ms, _batch_search_ms) =
-        quant_topk_two_ranges_batched_rerank(
+        quant_topk_two_ranges_batched_candidates(
             &path,
-            vector_path,
             dataset.vectors,
             bit_width,
             self_queries,
             random_queries,
             vector_ram_cap,
             &search_cache,
+            quant_query_major_rerank_candidates(bit_width),
         )?;
     let (timing, probe_prepare_ms) = time_quant_probes(
         &blocked_path,
-        vector_path,
         dataset.vectors,
         bit_width,
         self_queries,
         random_queries,
         vector_ram_cap,
         &search_cache,
+        quant_query_major_rerank_candidates(bit_width),
     )?;
 
     let self_r1 = recall_at_1_arrays(&self_results, self_truth);
@@ -3829,6 +3911,9 @@ fn bench_quant_batched(
 ) -> Result<Row, String> {
     let index_start = Instant::now();
     let mut index = TurboQuantIndex::new(DIM, bit_width).map_err(|e| format!("{e:?}"))?;
+    let calibration_sample = load_quant_calibration_sample(vector_path, dataset.vectors)?;
+    index.prepare_calibration(&calibration_sample);
+    drop(calibration_sample);
     for_each_vector_chunk(vector_path, dataset.vectors, vector_ram_cap, |_, chunk| {
         index.add(&chunk);
         Ok(())
@@ -3848,20 +3933,18 @@ fn bench_quant_batched(
     let search_cache = SearchCache::new(DIM, bit_width);
     let shared_cache_ms = cache_start.elapsed().as_secs_f64() * 1000.0;
     let (self_results, random_results, range_prepare_ms, search_ms) = if bit_width == 4 {
-        // The direct 4-bit top-10 is too noisy for a recall comparison. Keep
-        // the range-major throughput schedule, but exact-rerank a bounded
-        // candidate pool from the disk-backed FP32 store before reporting
-        // R@10. This preserves the 30/50 MiB working-set contract while
-        // avoiding the misleading ~88% raw 4-bit recall seen in B.
-        quant_topk_two_ranges_batched_rerank(
+        // Keep the range-major throughput schedule and merge a bounded
+        // candidate pool using only the persisted 4-bit scores. No raw FP32
+        // payload is opened by this bit-width path.
+        quant_topk_two_ranges_batched_candidates(
             &path,
-            vector_path,
             dataset.vectors,
             bit_width,
             self_queries,
             random_queries,
             vector_ram_cap,
             &search_cache,
+            QUANT_RERANK_CANDIDATES,
         )?
     } else {
         quant_topk_two_ranges_batched(
@@ -3953,15 +4036,15 @@ fn quant_topk_two_ranges_batched(
     ))
 }
 
-fn quant_topk_two_ranges_batched_rerank(
+fn quant_topk_two_ranges_batched_candidates(
     path: &Path,
-    raw_path: &Path,
     n: usize,
     bit_width: usize,
     self_queries: &[f32],
     random_queries: &[f32],
     vector_ram_cap: usize,
     search_cache: &SearchCache,
+    candidate_count: usize,
 ) -> Result<(Vec<[usize; K]>, Vec<[usize; K]>, f64, f64), String> {
     let self_nq = self_queries.len() / DIM;
     let random_nq = random_queries.len() / DIM;
@@ -3969,14 +4052,14 @@ fn quant_topk_two_ranges_batched_rerank(
         vec![Hit {
             score: f32::NEG_INFINITY,
             idx: usize::MAX,
-        }; QUANT_RERANK_CANDIDATES];
+        }; candidate_count];
         self_nq
     ];
     let mut random_heaps = vec![
         vec![Hit {
             score: f32::NEG_INFINITY,
             idx: usize::MAX,
-        }; QUANT_RERANK_CANDIDATES];
+        }; candidate_count];
         random_nq
     ];
     let per_chunk = quant_chunk_vectors(vector_ram_cap, bit_width);
@@ -3992,57 +4075,52 @@ fn quant_topk_two_ranges_batched_rerank(
         index.prepare_with_cache(search_cache);
         prepare_ms += prepare_start.elapsed().as_secs_f64() * 1000.0;
         let search_start = Instant::now();
-        search_quant_query_candidates(&index, self_queries, base, &mut self_heaps);
-        search_quant_query_candidates(&index, random_queries, base, &mut random_heaps);
+        search_quant_query_candidates(
+            &index,
+            self_queries,
+            base,
+            &mut self_heaps,
+            candidate_count,
+        );
+        search_quant_query_candidates(
+            &index,
+            random_queries,
+            base,
+            &mut random_heaps,
+            candidate_count,
+        );
         search_ms += search_start.elapsed().as_secs_f64() * 1000.0;
         base += take;
     }
 
-    let rerank_start = Instant::now();
-    let raw_file = File::open(raw_path)
-        .map_err(|e| format!("open raw FP32 store {}: {e}", raw_path.display()))?;
+    // The candidate pool is only a merge buffer for the quantized scores. It
+    // is finalized without opening any raw FP32 payload: this row represents
+    // a pure same-bit search path.
     let self_results = self_heaps
-        .iter()
-        .enumerate()
-        .map(|(qi, heap)| {
-            rerank_exact_candidates_from_file(
-                &raw_file,
-                &self_queries[qi * DIM..(qi + 1) * DIM],
-                heap,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .into_iter()
+        .map(finalize_candidate_heap)
+        .collect();
     let random_results = random_heaps
-        .iter()
-        .enumerate()
-        .map(|(qi, heap)| {
-            rerank_exact_candidates_from_file(
-                &raw_file,
-                &random_queries[qi * DIM..(qi + 1) * DIM],
-                heap,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let rerank_ms = rerank_start.elapsed().as_secs_f64() * 1000.0;
-    Ok((self_results, random_results, prepare_ms, search_ms + rerank_ms))
+        .into_iter()
+        .map(finalize_candidate_heap)
+        .collect();
+    Ok((self_results, random_results, prepare_ms, search_ms))
 }
 
 fn time_quant_probes(
     path: &Path,
-    raw_path: &Path,
     n: usize,
     bit_width: usize,
     self_queries: &[f32],
     random_queries: &[f32],
     vector_ram_cap: usize,
     search_cache: &SearchCache,
+    candidate_count: usize,
 ) -> Result<(QueryMajorTiming, f64), String> {
     let mut total_ms = 0.0f64;
     let mut first_ms = 0.0f64;
     let mut sample_count = 0usize;
     let mut prepare_ms = 0.0f64;
-    let raw_file = File::open(raw_path)
-        .map_err(|e| format!("open raw FP32 store {}: {e}", raw_path.display()))?;
     let mut blocked_file = File::open(path)
         .map_err(|e| format!("open {}: {e}", path.display()))?;
     for queries in [self_queries, random_queries] {
@@ -4053,12 +4131,12 @@ fn time_quant_probes(
                 quant_topk_one_query(
                     path,
                     &mut blocked_file,
-                    &raw_file,
                     n,
                     bit_width,
                     q,
                     vector_ram_cap,
                     search_cache,
+                    candidate_count,
                 )?;
             if sample_count == 0 {
                 first_ms = query_ms;
@@ -4111,17 +4189,18 @@ fn search_quant_query_candidates(
     queries: &[f32],
     global_base: usize,
     heaps: &mut [Vec<Hit>],
+    candidate_count: usize,
 ) {
     let nq = queries.len() / DIM;
     for query_base in (0..nq).step_by(QUERY_BATCH) {
         let query_take = (nq - query_base).min(QUERY_BATCH);
         let query_start = query_base * DIM;
         let query_end = (query_base + query_take) * DIM;
-        let results = index.search(&queries[query_start..query_end], QUANT_RERANK_CANDIDATES);
+        let results = index.search(&queries[query_start..query_end], candidate_count);
         for query_offset in 0..query_take {
             let result_offset = query_offset * results.k;
             let heap = &mut heaps[query_base + query_offset];
-            for rank in 0..results.k.min(QUANT_RERANK_CANDIDATES) {
+            for rank in 0..results.k.min(candidate_count) {
                 let score = results.scores[result_offset + rank];
                 let local_idx = results.indices[result_offset + rank];
                 if local_idx >= 0 && score.is_finite() {
@@ -4141,18 +4220,18 @@ fn search_quant_query_candidates(
 fn quant_topk_one_query(
     path: &Path,
     blocked_reader: &mut File,
-    raw_file: &File,
     n: usize,
     bit_width: usize,
     query: &[f32],
     vector_ram_cap: usize,
     search_cache: &SearchCache,
+    candidate_count: usize,
 ) -> Result<([usize; K], f64, f64), String> {
     let per_chunk = quant_chunk_vectors_query_major(vector_ram_cap, bit_width);
     let mut candidate_heap = vec![Hit {
         score: f32::NEG_INFINITY,
         idx: usize::MAX,
-    }; QUANT_RERANK_CANDIDATES];
+    }; candidate_count];
     let mut base = 0usize;
     let mut total_ms = 0.0f64;
     let mut staged_ms = 0.0f64;
@@ -4166,12 +4245,11 @@ fn quant_topk_one_query(
         staged_ms += stage_elapsed;
 
         let search_start = Instant::now();
-        // Expand the approximate candidate set before the final exact
-        // FP32 re-rank. Quantized top-10 alone is especially lossy at 4
-        // bits; a bounded candidate pool preserves recall without bringing
-        // the full raw store into RAM.
-        let results = index.search_one(query, QUANT_RERANK_CANDIDATES);
-        for rank in 0..results.k.min(QUANT_RERANK_CANDIDATES) {
+        // Keep a bounded candidate pool so a range can contribute more than
+        // its local top-10. The final result is still selected only by the
+        // persisted bit-width's score; no FP32 payload is consulted.
+        let results = index.search_one(query, candidate_count);
+        for rank in 0..results.k.min(candidate_count) {
             let local_idx = results.indices[rank];
             let score = results.scores[rank];
             if local_idx >= 0 && score.is_finite() {
@@ -4188,9 +4266,7 @@ fn quant_topk_one_query(
         base += take;
     }
 
-    let rerank_start = Instant::now();
-    let result = rerank_exact_candidates_from_file(raw_file, query, &candidate_heap)?;
-    total_ms += rerank_start.elapsed().as_secs_f64() * 1000.0;
+    let result = finalize_candidate_heap(candidate_heap);
     Ok((result, total_ms, staged_ms))
 }
 
@@ -4199,6 +4275,19 @@ fn finalize_heap(mut heap: [Hit; K]) -> [usize; K] {
     let mut ids = [0usize; K];
     for i in 0..K {
         ids[i] = heap[i].idx;
+    }
+    ids
+}
+
+fn finalize_candidate_heap(mut heap: Vec<Hit>) -> [usize; K] {
+    heap.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+    });
+    let mut ids = [usize::MAX; K];
+    for (slot, hit) in heap.into_iter().take(K).enumerate() {
+        ids[slot] = hit.idx;
     }
     ids
 }
@@ -4337,8 +4426,8 @@ fn vector_staging_label(cap: usize, bit_width: usize) -> String {
         )
     } else if bit_width == 16 {
         format!(
-            "{} decoded f32",
-            human_bytes((raw_chunk_vectors(cap) * DIM * std::mem::size_of::<f32>()) as u64)
+            "{} raw f16",
+            human_bytes((fp16_chunk_vectors_batched(cap) * DIM * std::mem::size_of::<u16>()) as u64)
         )
     } else {
         format!(

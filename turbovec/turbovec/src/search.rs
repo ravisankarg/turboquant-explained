@@ -1184,6 +1184,94 @@ struct QueryNeonLut {
     bias: f32,
 }
 
+enum PreparedQueryLut {
+    Nibble(QueryNeonLut),
+    Eight(Vec<f32>),
+}
+
+/// Query-side state reused while an HNSW request scores many sparse payload
+/// blocks. Rotation, TQ+ calibration, and the bit-specific lookup table are
+/// built once per query rather than once per candidate block.
+pub struct PreparedQuery {
+    lut: PreparedQueryLut,
+    bias_corr: f32,
+}
+
+/// Prepare one query for repeated same-bit candidate scoring.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_query_one(
+    query: &[f32],
+    rotation: &[f32],
+    centroids: &[f32],
+    tqplus_shift: &[f32],
+    tqplus_scale: &[f32],
+    bits: usize,
+    dim: usize,
+) -> PreparedQuery {
+    let q_rot = rotate_query_one(query, rotation, dim);
+    let (q_for_lut, bias_corr) = calibrate_query_one(&q_rot, tqplus_shift, tqplus_scale);
+    if bits == 8 {
+        PreparedQuery {
+            lut: PreparedQueryLut::Eight(build_8bit_query_lut(&q_for_lut, centroids, dim)),
+            bias_corr,
+        }
+    } else {
+        let mut lut = build_query_neon_lut_from_slice(&q_for_lut, centroids, bits, dim);
+        lut.bias += bias_corr;
+        PreparedQuery {
+            lut: PreparedQueryLut::Nibble(lut),
+            bias_corr: 0.0,
+        }
+    }
+}
+
+/// Score only the requested local ids using the prepared query and the
+/// persisted bit-width payload. No other representation is consulted.
+pub fn score_ids_one(
+    prepared: &PreparedQuery,
+    blocked_codes: &[u8],
+    vec_scales: &[f32],
+    bits: usize,
+    dim: usize,
+    n_vectors: usize,
+    ids: &[usize],
+) -> Vec<f32> {
+    let n_byte_groups = dim / (8 / bits);
+    ids.iter()
+        .map(|&id| {
+            if id >= n_vectors {
+                return f32::NEG_INFINITY;
+            }
+            let block_offset = (id / BLOCK) * n_byte_groups * BLOCK;
+            let lane = id % BLOCK;
+            match &prepared.lut {
+                PreparedQueryLut::Eight(q_lut) => {
+                    let mut score = prepared.bias_corr;
+                    for d in 0..dim {
+                        let code = blocked_codes[block_offset + d * BLOCK + lane] as usize;
+                        score += q_lut[d * 256 + code];
+                    }
+                    score * vec_scales[id]
+                }
+                PreparedQueryLut::Nibble(lut) => {
+                    let mut score = lut.bias;
+                    for g in 0..n_byte_groups {
+                        let code = blocked_codes[block_offset + g * BLOCK + lane];
+                        // ARM's blocked byte keeps the first coordinates in
+                        // the high nibble and the latter coordinates in the
+                        // low nibble. The LUT builder stores those two
+                        // sub-tables in the same first/second order.
+                        let first = lut.uint8_luts[g * 32 + (code >> 4) as usize];
+                        let second = lut.uint8_luts[g * 32 + 16 + (code & 0x0F) as usize];
+                        score += (first as f32 + second as f32) * lut.scale;
+                    }
+                    score * vec_scales[id]
+                }
+            }
+        })
+        .collect()
+}
+
 
 /// Build nibble LUTs for NEON/AVX2 scoring from a flat query rotation row.
 ///
@@ -1323,6 +1411,19 @@ pub fn search_one(
     let n_byte_groups = dim / (8 / bits);
 
     if bits == 8 {
+        #[cfg(target_arch = "aarch64")]
+        return search_one_8bit_coarse(
+            &q_for_lut,
+            bias_corr,
+            blocked_codes,
+            centroids,
+            vec_scales,
+            dim,
+            n_vectors,
+            n_blocks,
+            k,
+        );
+
         #[cfg(target_arch = "x86_64")]
         score_8bit_query_into_heap(
             &q_for_lut,
@@ -1341,7 +1442,7 @@ pub fn search_one(
             &mut heap_min,
             &mut heap_mi,
         );
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         score_8bit_query_into_heap_blocked(
             &q_for_lut,
             bias_corr,
@@ -1522,27 +1623,56 @@ fn push_heap_score(
         heap_i[*heap_sz] = idx;
         *heap_sz += 1;
         if *heap_sz == k {
-            *heap_min = heap_s[0];
-            *heap_mi = 0;
-            for h in 1..k {
-                if heap_s[h] < *heap_min {
-                    *heap_min = heap_s[h];
-                    *heap_mi = h;
+            // Heapify once. Thereafter the minimum stays at slot zero, so a
+            // rejected candidate is one comparison and a replacement is
+            // O(log k), instead of rescanning all k entries.
+            for pos in (0..(k / 2)).rev() {
+                let mut root = pos;
+                loop {
+                    let left = root * 2 + 1;
+                    if left >= k {
+                        break;
+                    }
+                    let right = left + 1;
+                    let child = if right < k && heap_s[right] < heap_s[left] {
+                        right
+                    } else {
+                        left
+                    };
+                    if heap_s[root] <= heap_s[child] {
+                        break;
+                    }
+                    heap_s.swap(root, child);
+                    heap_i.swap(root, child);
+                    root = child;
                 }
             }
         }
-    } else if score > *heap_min {
-        heap_s[*heap_mi] = score;
-        heap_i[*heap_mi] = idx;
-        *heap_min = heap_s[0];
-        *heap_mi = 0;
-        for h in 1..k {
-            if heap_s[h] < *heap_min {
-                *heap_min = heap_s[h];
-                *heap_mi = h;
+    } else if score > heap_s[0] {
+        heap_s[0] = score;
+        heap_i[0] = idx;
+        let mut root = 0usize;
+        loop {
+            let left = root * 2 + 1;
+            if left >= k {
+                break;
             }
+            let right = left + 1;
+            let child = if right < k && heap_s[right] < heap_s[left] {
+                right
+            } else {
+                left
+            };
+            if heap_s[root] <= heap_s[child] {
+                break;
+            }
+            heap_s.swap(root, child);
+            heap_i.swap(root, child);
+            root = child;
         }
     }
+    *heap_min = heap_s[0];
+    *heap_mi = 0;
 }
 
 /// Slot-allowlist bitmask: packed little-endian, bit `i` set iff slot `i` is
@@ -1815,6 +1945,236 @@ fn build_8bit_query_lut(q_row: &[f32], centroids: &[f32], dim: usize) -> Vec<f32
     lut
 }
 
+#[cfg(target_arch = "aarch64")]
+struct QueryEightBitCoarseLut {
+    values: Vec<u8>, // dim * 16 entries, indexed by the code high nibble
+    scale: f32,
+    bias: f32,
+}
+
+/// Build a coarse 16-level LUT from the high nibble of each 8-bit code.
+/// The full 8-bit code remains the authoritative score in the exact
+/// candidate pass; this table only reduces the number of vectors that need
+/// scalar 256-entry lookups.
+#[cfg(target_arch = "aarch64")]
+fn build_8bit_coarse_query_lut(
+    q_row: &[f32],
+    centroids: &[f32],
+    dim: usize,
+) -> QueryEightBitCoarseLut {
+    let mut values_f32 = vec![0.0f32; dim * 16];
+    let mut mins = vec![0.0f32; dim];
+    let mut max_span = 0.0f32;
+    let mut bias = 0.0f32;
+    for d in 0..dim {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for group in 0..16 {
+            let start = group * 16;
+            let mut centroid_mean = 0.0f32;
+            for code in start..start + 16 {
+                centroid_mean += centroids[code];
+            }
+            centroid_mean *= 1.0 / 16.0;
+            let value = q_row[d] * centroid_mean;
+            values_f32[d * 16 + group] = value;
+            lo = lo.min(value);
+            hi = hi.max(value);
+        }
+        mins[d] = lo;
+        bias += lo;
+        max_span = max_span.max(hi - lo);
+    }
+
+    let max_lut = 127.0f32;
+    let scale = if max_span > 1e-10 {
+        max_span / max_lut
+    } else {
+        1.0
+    };
+    let inv_scale = 1.0 / scale;
+    let mut values = vec![0u8; dim * 16];
+    for d in 0..dim {
+        for group in 0..16 {
+            values[d * 16 + group] = ((values_f32[d * 16 + group] - mins[d]) * inv_scale)
+                .round()
+                .clamp(0.0, max_lut) as u8;
+        }
+    }
+    QueryEightBitCoarseLut { values, scale, bias }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn score_8bit_coarse_block_neon(
+    blocked_codes: &[u8],
+    lut: &QueryEightBitCoarseLut,
+    block_offset: usize,
+    dim: usize,
+    vec_scales: &[f32],
+    base_vec: usize,
+    n_vectors: usize,
+    out: &mut [f32; BLOCK],
+) {
+    use std::arch::aarch64::*;
+
+    let n_batches = (dim + FLUSH_EVERY - 1) / FLUSH_EVERY;
+    let mut fa = [vdupq_n_f32(lut.bias); 8];
+    let codes_base = blocked_codes.as_ptr().add(block_offset);
+    let lut_base = lut.values.as_ptr();
+    for batch in 0..n_batches {
+        let d_start = batch * FLUSH_EVERY;
+        let d_end = (d_start + FLUSH_EVERY).min(dim);
+        let mut accum = [vdupq_n_u16(0); 4];
+        for d in d_start..d_end {
+            let lp = lut_base.add(d * 16);
+            let cp = codes_base.add(d * BLOCK);
+            let table = vld1q_u8(lp);
+            let c0 = vld1q_u8(cp);
+            let c1 = vld1q_u8(cp.add(16));
+            let s0 = vqtbl1q_u8(table, vshrq_n_u8(c0, 4));
+            let s1 = vqtbl1q_u8(table, vshrq_n_u8(c1, 4));
+            accum[0] = vaddw_u8(accum[0], vget_low_u8(s0));
+            accum[1] = vaddw_u8(accum[1], vget_high_u8(s0));
+            accum[2] = vaddw_u8(accum[2], vget_low_u8(s1));
+            accum[3] = vaddw_u8(accum[3], vget_high_u8(s1));
+        }
+        for i in 0..4 {
+            let lo = vcvtq_f32_u32(vmovl_u16(vget_low_u16(accum[i])));
+            let hi = vcvtq_f32_u32(vmovl_u16(vget_high_u16(accum[i])));
+            fa[i * 2] = vfmaq_f32(fa[i * 2], vdupq_n_f32(lut.scale), lo);
+            fa[i * 2 + 1] = vfmaq_f32(fa[i * 2 + 1], vdupq_n_f32(lut.scale), hi);
+        }
+    }
+
+    let end = (base_vec + BLOCK).min(n_vectors);
+    let vec_scales_ptr = vec_scales.as_ptr().add(base_vec);
+    let mut decoded = [0.0f32; BLOCK];
+    for i in 0..8 {
+        vst1q_f32(decoded.as_mut_ptr().add(i * 4), fa[i]);
+    }
+    for lane in 0..BLOCK {
+        *out.get_unchecked_mut(lane) = if lane < end - base_vec {
+            decoded[lane] * *vec_scales_ptr.add(lane)
+        } else {
+            f32::NEG_INFINITY
+        };
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn score_8bit_exact_id(
+    q_lut: &[f32],
+    bias_corr: f32,
+    blocked_codes: &[u8],
+    vec_scales: &[f32],
+    dim: usize,
+    id: usize,
+) -> f32 {
+    let block_offset = (id / BLOCK) * dim * BLOCK;
+    let lane = id % BLOCK;
+    let mut score = bias_corr;
+    for d in 0..dim {
+        let code = blocked_codes[block_offset + d * BLOCK + lane] as usize;
+        score += q_lut[d * 256 + code];
+    }
+    score * vec_scales[id]
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+fn search_one_8bit_coarse(
+    q_row: &[f32],
+    bias_corr: f32,
+    blocked_codes: &[u8],
+    centroids: &[f32],
+    vec_scales: &[f32],
+    dim: usize,
+    n_vectors: usize,
+    n_blocks: usize,
+    k: usize,
+) -> (Vec<f32>, Vec<i64>) {
+    let coarse_k = k.saturating_mul(4).max(256).min(n_vectors);
+    let coarse_lut = build_8bit_coarse_query_lut(q_row, centroids, dim);
+    let mut coarse_scores = vec![f32::NEG_INFINITY; coarse_k];
+    let mut coarse_indices = vec![0u32; coarse_k];
+    let mut coarse_size = 0usize;
+    let mut coarse_min = f32::NEG_INFINITY;
+    let mut coarse_min_idx = 0usize;
+    for block_idx in 0..n_blocks {
+        let base_vec = block_idx * BLOCK;
+        let block_offset = block_idx * dim * BLOCK;
+        let mut block_out = [0.0f32; BLOCK];
+        unsafe {
+            score_8bit_coarse_block_neon(
+                blocked_codes,
+                &coarse_lut,
+                block_offset,
+                dim,
+                vec_scales,
+                base_vec,
+                n_vectors,
+                &mut block_out,
+            );
+        }
+        let end = (n_vectors - base_vec).min(BLOCK);
+        for lane in 0..end {
+            push_heap_score(
+                block_out[lane],
+                (base_vec + lane) as u32,
+                coarse_k,
+                &mut coarse_scores,
+                &mut coarse_indices,
+                &mut coarse_size,
+                &mut coarse_min,
+                &mut coarse_min_idx,
+            );
+        }
+    }
+
+    let q_lut = build_8bit_query_lut(q_row, centroids, dim);
+    let mut exact_scores = vec![f32::NEG_INFINITY; k];
+    let mut exact_indices = vec![0u32; k];
+    let mut exact_size = 0usize;
+    let mut exact_min = f32::NEG_INFINITY;
+    let mut exact_min_idx = 0usize;
+    for rank in 0..coarse_size {
+        let id = coarse_indices[rank] as usize;
+        let score = score_8bit_exact_id(
+            &q_lut,
+            bias_corr,
+            blocked_codes,
+            vec_scales,
+            dim,
+            id,
+        );
+        push_heap_score(
+            score,
+            id as u32,
+            k,
+            &mut exact_scores,
+            &mut exact_indices,
+            &mut exact_size,
+            &mut exact_min,
+            &mut exact_min_idx,
+        );
+    }
+    let mut pairs: Vec<(f32, u32)> = exact_scores[..exact_size]
+        .iter()
+        .zip(exact_indices[..exact_size].iter())
+        .map(|(&score, &idx)| (score, idx))
+        .collect();
+    pairs.sort_unstable_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (
+        pairs.iter().map(|p| p.0).collect(),
+        pairs.iter().map(|p| p.1 as i64).collect(),
+    )
+}
+
 #[cfg(not(target_arch = "x86_64"))]
 #[allow(clippy::too_many_arguments)]
 fn score_8bit_query_into_heap_blocked(
@@ -1855,38 +2215,45 @@ fn score_8bit_query_into_heap_blocked(
             // in registers and stream the code bytes linearly. NEON has no f32
             // gather-by-u8 instruction, so this exact 8-bit path is organized
             // for cache locality rather than fake vector gathers.
-            scores[0] += lut[codes[0] as usize];
-            scores[1] += lut[codes[1] as usize];
-            scores[2] += lut[codes[2] as usize];
-            scores[3] += lut[codes[3] as usize];
-            scores[4] += lut[codes[4] as usize];
-            scores[5] += lut[codes[5] as usize];
-            scores[6] += lut[codes[6] as usize];
-            scores[7] += lut[codes[7] as usize];
-            scores[8] += lut[codes[8] as usize];
-            scores[9] += lut[codes[9] as usize];
-            scores[10] += lut[codes[10] as usize];
-            scores[11] += lut[codes[11] as usize];
-            scores[12] += lut[codes[12] as usize];
-            scores[13] += lut[codes[13] as usize];
-            scores[14] += lut[codes[14] as usize];
-            scores[15] += lut[codes[15] as usize];
-            scores[16] += lut[codes[16] as usize];
-            scores[17] += lut[codes[17] as usize];
-            scores[18] += lut[codes[18] as usize];
-            scores[19] += lut[codes[19] as usize];
-            scores[20] += lut[codes[20] as usize];
-            scores[21] += lut[codes[21] as usize];
-            scores[22] += lut[codes[22] as usize];
-            scores[23] += lut[codes[23] as usize];
-            scores[24] += lut[codes[24] as usize];
-            scores[25] += lut[codes[25] as usize];
-            scores[26] += lut[codes[26] as usize];
-            scores[27] += lut[codes[27] as usize];
-            scores[28] += lut[codes[28] as usize];
-            scores[29] += lut[codes[29] as usize];
-            scores[30] += lut[codes[30] as usize];
-            scores[31] += lut[codes[31] as usize];
+            // The ARM blocked layout is sequential. Keep bounds checks out of
+            // this hot coordinate loop; pack::repack establishes the exact
+            // 32-byte code and 256-entry LUT ranges above.
+            unsafe {
+                let codes_ptr = codes.as_ptr();
+                let lut_ptr = lut.as_ptr();
+                scores[0] += *lut_ptr.add(*codes_ptr.add(0) as usize);
+                scores[1] += *lut_ptr.add(*codes_ptr.add(1) as usize);
+                scores[2] += *lut_ptr.add(*codes_ptr.add(2) as usize);
+                scores[3] += *lut_ptr.add(*codes_ptr.add(3) as usize);
+                scores[4] += *lut_ptr.add(*codes_ptr.add(4) as usize);
+                scores[5] += *lut_ptr.add(*codes_ptr.add(5) as usize);
+                scores[6] += *lut_ptr.add(*codes_ptr.add(6) as usize);
+                scores[7] += *lut_ptr.add(*codes_ptr.add(7) as usize);
+                scores[8] += *lut_ptr.add(*codes_ptr.add(8) as usize);
+                scores[9] += *lut_ptr.add(*codes_ptr.add(9) as usize);
+                scores[10] += *lut_ptr.add(*codes_ptr.add(10) as usize);
+                scores[11] += *lut_ptr.add(*codes_ptr.add(11) as usize);
+                scores[12] += *lut_ptr.add(*codes_ptr.add(12) as usize);
+                scores[13] += *lut_ptr.add(*codes_ptr.add(13) as usize);
+                scores[14] += *lut_ptr.add(*codes_ptr.add(14) as usize);
+                scores[15] += *lut_ptr.add(*codes_ptr.add(15) as usize);
+                scores[16] += *lut_ptr.add(*codes_ptr.add(16) as usize);
+                scores[17] += *lut_ptr.add(*codes_ptr.add(17) as usize);
+                scores[18] += *lut_ptr.add(*codes_ptr.add(18) as usize);
+                scores[19] += *lut_ptr.add(*codes_ptr.add(19) as usize);
+                scores[20] += *lut_ptr.add(*codes_ptr.add(20) as usize);
+                scores[21] += *lut_ptr.add(*codes_ptr.add(21) as usize);
+                scores[22] += *lut_ptr.add(*codes_ptr.add(22) as usize);
+                scores[23] += *lut_ptr.add(*codes_ptr.add(23) as usize);
+                scores[24] += *lut_ptr.add(*codes_ptr.add(24) as usize);
+                scores[25] += *lut_ptr.add(*codes_ptr.add(25) as usize);
+                scores[26] += *lut_ptr.add(*codes_ptr.add(26) as usize);
+                scores[27] += *lut_ptr.add(*codes_ptr.add(27) as usize);
+                scores[28] += *lut_ptr.add(*codes_ptr.add(28) as usize);
+                scores[29] += *lut_ptr.add(*codes_ptr.add(29) as usize);
+                scores[30] += *lut_ptr.add(*codes_ptr.add(30) as usize);
+                scores[31] += *lut_ptr.add(*codes_ptr.add(31) as usize);
+            }
         }
 
         for lane in 0..end_lane {
@@ -1897,32 +2264,16 @@ fn score_8bit_query_into_heap_blocked(
                 }
             }
             let score = scores[lane] * vec_scales[vi];
-            if *heap_sz < k {
-                heap_s[*heap_sz] = score;
-                heap_i[*heap_sz] = vi as u32;
-                *heap_sz += 1;
-                if *heap_sz == k {
-                    *heap_min = heap_s[0];
-                    *heap_mi = 0;
-                    for h in 1..k {
-                        if heap_s[h] < *heap_min {
-                            *heap_min = heap_s[h];
-                            *heap_mi = h;
-                        }
-                    }
-                }
-            } else if score > *heap_min {
-                heap_s[*heap_mi] = score;
-                heap_i[*heap_mi] = vi as u32;
-                *heap_min = heap_s[0];
-                *heap_mi = 0;
-                for h in 1..k {
-                    if heap_s[h] < *heap_min {
-                        *heap_min = heap_s[h];
-                        *heap_mi = h;
-                    }
-                }
-            }
+            push_heap_score(
+                score,
+                vi as u32,
+                k,
+                heap_s,
+                heap_i,
+                heap_sz,
+                heap_min,
+                heap_mi,
+            );
         }
     }
 }
@@ -1944,6 +2295,24 @@ fn search_8bit_scalar(
     (0..nq)
         .into_par_iter()
         .map(|qi| {
+            #[cfg(target_arch = "aarch64")]
+            if mask.is_none() {
+                // ARM has no f32 gather for the full 8-bit LUT. Use a
+                // high-nibble NEON scan to keep a bounded candidate pool,
+                // then score those ids with the exact persisted 8-bit LUT.
+                return search_one_8bit_coarse(
+                    &q_for_lut[qi * dim..(qi + 1) * dim],
+                    bias_corrs[qi],
+                    blocked_codes,
+                    centroids,
+                    vec_scales,
+                    dim,
+                    n_vectors,
+                    n_blocks,
+                    k,
+                );
+            }
+
             let mut heap_s = vec![f32::NEG_INFINITY; k];
             let mut heap_i = vec![0u32; k];
             let mut heap_sz = 0usize;

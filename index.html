@@ -302,25 +302,25 @@
         <p>
           This repo includes VectorDB 3.0, a native Android app that downloads one 100K Cohere 768-dimensional vector slice, then benchmarks separate 50K and 100K FlatIndex and HNSW tables. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. Each index family has two distinct paths: A) real-traffic query-major latency and B) batched throughput. Both paths compare FP32, persisted FP16, TurboQuant 8-bit, and TurboQuant 4-bit payloads with disk-backed bounded reads.
         </p>
-        <p class="section-note">Latest verified release: v0.5 on the S25 (`SM_S938B`). Every row clears the 98% random R@10 floor. The tables below are populated from the four cached JSON report files pulled directly over ADB.</p>
+        <p class="section-note">Latest verified release: v0.5 on the S25 (`SM_S938B`). The tables are a same-bit device snapshot: FlatIndex 4-bit and HNSW 8/4-bit remain below the 98% random R@10 target, and are shown explicitly rather than hidden by an FP32 rerank. The tables below are populated from cached JSON report files pulled directly over ADB.</p>
         <div class="hero-actions bench-actions">
           <a class="button primary" href="releases/android/vecdb-release-v0.5.apk">Download vecdb-release-v0.5 APK</a>
           <a class="button ghost" href="android/TurboQuantBench/">Open Android source</a>
           <a class="button ghost" href="turbovec/turbovec/src/search.rs">Open Rust search code</a>
         </div>
-        <p class="section-note">Release v0.5, versionCode 6. SHA-256: <code>98d3a42165d4ce7fa596a23a399b3d01319d5dedbc1602ce46d64a46022b201c</code>.</p>
+        <p class="section-note">Release v0.5, versionCode 6. SHA-256: <code>2a785a84ded4679e3b75dd30848b1b595506683755ac8bf4df3749fd7e52cf79</code>.</p>
       </div>
 
       <div class="bench-hero-grid">
         <article class="bench-stat">
           <span>Best current one-query latency</span>
-          <strong>19.153 ms/query</strong>
-          <p>Best current query-major row: FlatIndex 4-bit over 50K, with exact candidate rerank.</p>
+          <strong>16.210 ms/query</strong>
+          <p>Best measured query-major row: FlatIndex 4-bit over 50K, using same-bit NEON LUT scoring with no FP32 rerank.</p>
         </article>
         <article class="bench-stat">
           <span>8-bit ARM caveat</span>
-          <strong>46.551 vs 136.253</strong>
-          <p>50K FlatIndex A: 8-bit vs FP16. Smaller ROM does not remove scalar byte-code and range-prep work.</p>
+          <strong>30.123 vs 21.381</strong>
+          <p>50K FlatIndex A: 8-bit vs FP16. Dense NEON FP16 dot work beats byte-indexed lookup work here.</p>
         </article>
         <article class="bench-stat">
           <span>Pure-vector RAM caps</span>
@@ -361,7 +361,7 @@
             <dt>Data store</dt>
             <dd>All payloads are disk-backed; the complete 50K/100K stores are not resident in RAM. HNSW adjacency is compact and resident, while its payload vectors remain on disk.</dd>
             <dt>Vector staging</dt>
-            <dd>Method-specific vector payload held for the active disk chunk/range. FP32 uses raw f32, FP16 uses decoded f32, and low-bit rows use their compressed active ranges.</dd>
+            <dd>Method-specific vector payload held for the active disk chunk/range. FP32 uses raw f32, FP16 uses raw half bits with conversion during scoring, and low-bit rows use their compressed active ranges.</dd>
             <dt>Search RAM</dt>
             <dd>Active vector payload in RAM only, not overall app RAM. UI, runtime/dependency libraries, allocator overhead, OS page cache, persisted ROM, and temporary build peaks are outside this KPI.</dd>
             <dt>Search RAM cap</dt>
@@ -378,11 +378,11 @@
             <dt>FlatIndex methods</dt>
             <dd>FlatIndex scans every vector; HNSW traverses a compact M=16 graph. Both families have A query-major and B batched-throughput paths, with the same 30/50 MiB pure-vector caps.</dd>
             <dt>HNSW parameters</dt>
-            <dd><code>M=16</code>, <code>efConstruction=128</code>, <code>efSearch=1024</code>, max layers 8, base degree at most 32. The larger search frontier is the recall/latency tradeoff that keeps random R@10 above 98%.</dd>
+            <dd><code>M=16</code>, <code>efConstruction=128</code>, <code>efSearch=1024</code>, max layers 8, base degree at most 32. The larger search frontier improves navigation recall, but HNSW 8/4 still show same-bit quantization loss.</dd>
             <dt>FP16 disk scan</dt>
-            <dd>Persists IEEE FP16, decodes one bounded chunk into FP32 staging memory, scans it, then releases it before the next chunk.</dd>
+            <dd>Persists IEEE FP16, reads one bounded half-bit chunk, converts four values at a time with ARM FP16/NEON instructions during the dot product, then releases the chunk.</dd>
             <dt>8-bit TurboQuant</dt>
-            <dd>Uses rotation, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer. Its main byte-indexed centroid lookup loop is scalar, so it can be slower than FP16 despite smaller ROM.</dd>
+            <dd>Uses rotation, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer. Its main byte-indexed centroid lookup loop is scalar, so it can be slower than FP16 despite smaller ROM; query-major ARM also uses bounded coarse-to-exact same-bit scoring.</dd>
             <dt>4-bit TurboQuant</dt>
             <dd>Uses bit-plane packed codes, blocked 32-vector layout, per-query nibble LUTs, and ARM NEON lookup accumulation. The kernel is efficient, but this one-query KPI also includes loading and preparing every bounded range.</dd>
             <dt>GPU</dt>
@@ -396,7 +396,65 @@
           <h3>Current benchmark conditions</h3>
           <span>VectorDB 3.0</span>
         </div>
-        <p>The current APK uses a pure-vector search cap of 30 MiB for 50K and 50 MiB for 100K. Even FP32 is disk-backed: query-major A reads bounded raw chunks, while batched B reuses one bounded chunk across the 2,000-query batch. TurboQuant reads bounded compressed ranges; HNSW keeps compact adjacency resident but reads payload candidates from disk. Query-major raw FP32 windows are 9,897 vectors at 50K and 16,724 at 100K; batched windows are 7,898 and 14,725. These are staging windows, not resident databases. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build peaks are outside the KPI. The global minimum random R@10 is 98.22%.</p>
+        <p>The current APK uses a pure-vector search cap of 30 MiB for 50K and 50 MiB for 100K. Even FP32 is disk-backed: query-major A reads bounded raw chunks, while batched B reuses one bounded chunk across the 2,000-query batch. TurboQuant reads bounded compressed ranges; HNSW keeps compact adjacency resident but reads payload candidates from disk. Query-major raw FP32 windows are 9,897 vectors at 50K and 16,724 at 100K; batched windows are 7,898 and 14,725. These are staging windows, not resident databases. App/UI memory, Rust/runtime/dependency libraries, allocator overhead, OS file cache, persisted ROM, and temporary full-index build peaks are outside the KPI. The lowest random R@10 in this snapshot is 89.50% on HNSW 4-bit; that loss is visible because quantized rows use same-bit finalization only.</p>
+      </div>
+
+      <div class="native-stack benchmark-flows">
+        <div class="section-copy wide">
+          <p class="eyebrow">How the benchmark actually runs</p>
+          <h2>Four paths, four different scheduling contracts</h2>
+          <p>Both index families use the same 30/50 MiB pure-vector cap, but A and B intentionally answer different performance questions. Quantized paths also obey a strict same-bit rule: their search and final top-10 come from the measured representation alone.</p>
+        </div>
+        <div class="native-grid">
+          <article>
+            <span class="step">A1</span>
+            <h3>FlatIndex A: one real request</h3>
+            <p>For one query, read every bounded raw chunk or compressed range, score all vectors in that range, merge top-10, release it, and continue. Only after the query completes does the next request begin.</p>
+          </article>
+          <article>
+            <span class="step">B1</span>
+            <h3>FlatIndex B: range-major batch</h3>
+            <p>Load one range once, scan it against all 2,000 queries with eight Rayon workers, update one heap per query, release the range, and move on. This is why B has excellent amortized throughput.</p>
+          </article>
+          <article>
+            <span class="step">A2</span>
+            <h3>HNSW A: graph then payload</h3>
+            <p>Traverse the resident <code>M=16</code> graph with <code>efSearch=1024</code>, read candidate payload spans from disk, score the selected bit-width, finish top-10, and then start the next query.</p>
+          </article>
+          <article>
+            <span class="step">B2</span>
+            <h3>HNSW B: shared graph batch</h3>
+            <p>Eight workers share the graph and reuse bounded candidate caches while processing 2,000 queries. The reported <code>ms/query</code> is batch time divided by 2,000, not isolated request latency.</p>
+          </article>
+        </div>
+        <div class="definitions-grid">
+          <article>
+            <h3>Each FlatIndex bit flow</h3>
+            <dl>
+              <dt>FP32</dt>
+              <dd>Read bounded raw <code>.f32</code> chunks and compute exact 768-dimensional dots.</dd>
+              <dt>FP16</dt>
+              <dd>Read persisted half bits and convert four values at a time through the arm64 NEON dot loop; no full FP32 database is resident.</dd>
+              <dt>8-bit</dt>
+              <dd>Rotate/calibrate the query, build byte LUTs, scan block-major codes, and finalize with same-bit 8-bit scores. ARM query-major uses a bounded coarse candidate pass.</dd>
+              <dt>4-bit</dt>
+              <dd>Rotate/calibrate the query, build nibble LUTs, scan two nibbles per byte in 32-vector blocks with NEON, and finalize with same-bit 4-bit scores only.</dd>
+            </dl>
+          </article>
+          <article>
+            <h3>Each HNSW payload flow</h3>
+            <dl>
+              <dt>Shared graph</dt>
+              <dd>Build once over persisted FP16 navigation vectors; adjacency stays resident while payload stores stay on disk.</dd>
+              <dt>FP32 / FP16</dt>
+              <dd>Use graph-selected IDs, then score candidates from the matching disk-backed FP32 or FP16 payload.</dd>
+              <dt>8-bit / 4-bit</dt>
+              <dd>Use graph-selected IDs, read the matching compressed payload, and finalize from same-bit scores. No raw-FP32 rescue pass is allowed.</dd>
+              <dt>Why recall differs</dt>
+              <dd><code>efSearch</code> can improve candidate coverage, but it cannot restore precision lost by the compressed payload; sparse candidate reads also raise latency.</dd>
+            </dl>
+          </article>
+        </div>
       </div>
 
       <div class="native-stack">
@@ -413,17 +471,17 @@
           <article>
             <span class="step">2</span>
             <h3>Blocked 32-vector layout</h3>
-            <p><code>prepare()</code> repacks compact codes into 32-vector blocks so a query scans contiguous bytes instead of chasing one vector at a time.</p>
+            <p><code>prepare()</code> repacks compact codes into 32-vector blocks so a query scans contiguous bytes instead of chasing one vector at a time. The active block remains bounded by the pure-vector cap.</p>
           </article>
           <article>
             <span class="step">3</span>
             <h3>NEON nibble LUT path</h3>
-            <p>4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed. The LUT kernel is fast; disk range staging can still dominate end-to-end latency.</p>
+            <p>4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed and final ranking stays 4-bit. The LUT kernel is fast; disk range staging and quantization error still affect the end-to-end result.</p>
           </article>
           <article>
             <span class="step">4</span>
             <h3>Why 8-bit can be slower</h3>
-            <p>On arm64, the 8-bit scorer scans contiguous block-major bytes but performs scalar centroid lookups for each dimension. FP16 uses a simpler dense dot-product scan; 4-bit has a dedicated NEON nibble-LUT kernel, but its query-major result still includes per-range staging and preparation.</p>
+            <p>On arm64, FlatIndex A FP16 uses native FP16-to-FP32 conversion plus NEON dot products. The 8-bit scorer still performs byte-indexed centroid lookups for each dimension, so it can lose to FP16 despite smaller ROM. 4-bit has a dedicated NEON nibble-LUT kernel, but its query-major result still includes per-range staging and its lower precision is visible in recall.</p>
           </article>
         </div>
       </div>
